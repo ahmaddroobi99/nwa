@@ -1,0 +1,57 @@
+build/
+
+clean~
+clean
+*.swp
+.DS_Store
+*.zip
+*.html
+*.so
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# eclipse related files 
+.project
+.pydevproject
+.settings/
+
+# pycharm files
+.idea/
+
+# data files
+*.csv
+*.nc
+*.zarr
+
+# fig and movies
+*.png
+*.jpg
+*.pdf
+*.mp4
+*figs/
+
+# openoffice
+*.odp#
+
+# jupyter
+.ipynb*
+
+# logins
+*.login
+
+# dask files
+daskf.pbs
+dask-worker*
+dask-scheduler*
+jlab.pbs.o*
+*.log
+*.nodefile
+
+# specific data 
+sandbox/data
+run_*
+log
+

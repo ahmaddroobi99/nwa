@@ -1,0 +1,1313 @@
+# -*- coding: utf-8 -*-
+"""
+Hybrid Grid class
+
+Attempt at replicating Rusty's TriGrid
+
+Created on Tue Oct 22 18:29:07 2013
+
+@author: mrayson
+"""
+
+import numpy as np
+from scipy import sparse
+import operator as op
+import matplotlib.pyplot as plt
+
+from . import ugridutils
+#from . import newugridutils as ugridutils
+import pdb
+
+###
+# HybridGrid class global definitions
+###
+# edge markers:
+CUT_EDGE = 37 # the marker for a cut edge
+OPEN_EDGE = 3
+LAND_EDGE = 1
+DELETED_EDGE = -1
+
+# edge-cell markers ( the cell ids that reside in the edge array
+BOUNDARY = -1 # cell marker for edge of domain
+UNMESHED = -2 # cell marker for edges not yet meshed
+
+FILLVALUE=-999999
+#FILLVALUE=999999
+
+class TriGridError(Exception):
+    pass
+
+class NoSuchEdgeError(TriGridError):
+    pass
+
+class NoSuchCellError(TriGridError):
+    pass
+
+class HybridGrid(object):
+    """
+    Class for dealing with grids that have cells with an 
+    arbitrary number of sides.
+    
+    
+    """
+    
+    _pnt2cells = None
+    _pnt2edges = None
+
+    VERBOSE=False
+
+    lightmode=False
+
+    nfaces=None
+    edges=None
+    mark=None
+    markcell=None
+    grad=None
+    neigh=None
+    face=None
+    xv=None
+    yv=None
+
+    _FillValue = FILLVALUE # Default is -999999
+
+    def __init__(self,xp,yp,cells,**kwargs):
+        if self.VERBOSE:
+            print("Creating a hybridgrid class:")
+
+        self.__dict__.update(**kwargs)
+        
+        self.xp = xp
+        self.yp = yp
+        self.cells=cells
+
+        # Set the size parameters
+        self.Np = self.xp.shape[0]
+        self.Nc = self.cells.shape[0]
+
+        # Check the _FillValue is suitable
+        if self.cells.max()>self.Np:
+            print('Changing the _FillValue from {} to {}'.format(\
+                    self._FillValue, self.cells.max()))
+            self._FillValue=self.cells.max()
+            self.cells[self.cells==self._FillValue] = -1
+
+
+        # Get the number of faces
+        if self.nfaces is None:
+            self.nfaces = 3*np.ones((self.Nc,),np.int64)
+            self.MAXFACES = 3
+        else:
+            self.MAXFACES = np.max(self.nfaces)
+
+        # Make sure the inputs are ndarrays
+        self.check_inputs()
+            
+        #######
+        # Compute the rest of the grid quantities
+        #######
+        if not self.lightmode:
+            self.calc_all_properties()
+
+
+    def calc_all_properties(self):
+        """
+        Calculate all of the grid properties again
+        """
+        # Get the edges
+        if self.edges is None or self.grad is None:
+            if self.VERBOSE:
+                print("Creating the edges...")
+            self.make_edges_from_cells()
+            #self.make_edges_from_cells_sparse()
+        else:
+            self.edges = self.edges.astype(np.int64)
+            self.grad = self.grad.astype(np.int64)
+
+        self.Ne = self.edges.shape[0]
+
+        # make_edges_from_cells sets everything to zero
+        if not self.mark is None:
+            self.mark=self.mark.astype(np.int64)
+
+        # Make sure the BCs are ok
+        self.check_missing_bcs()
+
+        # Make sure the nodes are rotated counter-clockwise
+        self.Ac = self.calc_area()
+        self.ensure_ccw()
+
+        # Face->edge connectivity
+        self.face = self.cell_edge_map()
+        self.face[self.face==self._FillValue] = -1
+
+        #if self.markcell is None:
+        #    self.markcell = self.calc_markcell(self.mark)
+
+        if self.neigh is None:
+            self.make_neigh_from_cells()
+        else:
+            self.neigh=self.neigh
+        
+        if self.xv is None:
+            self.calc_centroids()
+        else:
+            self.xv = self.xv
+            self.yv = self.yv
+
+        # Calculate the coordintes
+        self.edge_centers()
+
+        # Calculate distance and other metrics
+        self.calc_unitnormal()
+        self.calc_normal()
+
+        self.calc_dg()
+        self.calc_def()
+        self.calc_dfe()
+        self.calc_df()
+        #self.calc_tangent()
+        #self.calc_Aj()
+
+    ###################################
+    # Geometry functions
+    ###################################
+    def calc_centroids(self):
+        """
+        Calculate the centroid coordinates of each cell
+        
+        This needs to be done differently depending on geometry
+         - Triangles : use circumcenter
+         - Quads : calculate circumcenter of two triangles and take geometric mean
+         - Other : mid-point (average coordinate)
+        """ 
+        xp = np.array(self.xp)
+        yp = np.array(self.yp)
+
+        self._xva = np.zeros((self.Nc,))
+        self._yva = np.zeros((self.Nc,))
+        self._xvb = np.zeros((self.Nc,))
+        self._yvb = np.zeros((self.Nc,))
+        self.xc = np.zeros((self.Nc,))
+        self.yc = np.zeros((self.Nc,))
+        
+        self.xca = np.zeros((self.Nc,))
+        self.yca = np.zeros((self.Nc,))
+        
+        for N in range(3,self.MAXFACES+1):
+            ind = self.nfaces==N
+            cells = self.cells[ind,0:N]
+            
+            #xtmp,ytmp = centroid(xp[cells],yp[cells],N)
+            if N ==3:
+                # Use the circumcenter for triangles
+                xtmp,ytmp = circumcenter(xp[cells[:,0]],yp[cells[:,0]],\
+                    xp[cells[:,1]],yp[cells[:,1]],xp[cells[:,2]],yp[cells[:,2]])
+                    
+                xtmpa = xtmp
+                ytmpa = ytmp
+                #self.xca[ind],self.yca[ind]  = centroid(xp[cells[:,0:N]],yp[cells[:,0:N]],N) 
+                # Triangle just use circumcenter
+                self.xca[ind] = xtmp
+                self.yca[ind] = ytmp
+                
+            elif N == 4:
+                xtmp1,ytmp1 = circumcenter(xp[cells[:,0]],yp[cells[:,0]],\
+                    xp[cells[:,1]],yp[cells[:,1]],xp[cells[:,2]],yp[cells[:,2]])
+                xtmp2,ytmp2 = circumcenter(xp[cells[:,0]],yp[cells[:,0]],\
+                    xp[cells[:,2]],yp[cells[:,2]],xp[cells[:,3]],yp[cells[:,3]])
+                    
+                xtmp = np.sqrt(xtmp1*xtmp2)                
+                ytmp = np.sqrt(ytmp1*ytmp2)
+                
+                xtmp1,ytmp1 = circumcenter(xp[cells[:,1]],yp[cells[:,1]],\
+                    xp[cells[:,2]],yp[cells[:,2]],xp[cells[:,3]],yp[cells[:,3]])
+                xtmp2,ytmp2 = circumcenter(xp[cells[:,3]],yp[cells[:,3]],\
+                    xp[cells[:,0]],yp[cells[:,0]],xp[cells[:,1]],yp[cells[:,1]])
+                    
+                xtmpa = np.sqrt(xtmp1*xtmp2)                
+                ytmpa = np.sqrt(ytmp1*ytmp2)
+                
+                self.xca[ind],self.yca[ind]  = centroid(xp[cells[:,0:N]],yp[cells[:,0:N]],N) 
+                
+            else:
+                xtmp = xp[cells].mean(axis=-1)
+                ytmp = yp[cells].mean(axis=-1)
+                
+                xtmpa = xtmp
+                ytmpa = ytmp
+                
+                self.xca[ind],self.yca[ind]  = centroid(xp[cells[:,0:N]],yp[cells[:,0:N]],N)
+                
+                
+            self._xva[ind] = xtmp
+            self._yva[ind] = ytmp
+            
+            self._xvb[ind] = xtmpa
+            self._yvb[ind] = ytmpa
+            
+            # Save centroids in xc,yc attributes
+            self.xc[ind] = xp[cells].mean(axis=-1)
+            self.yc[ind] = yp[cells].mean(axis=-1)
+            
+        ####
+        # Option 1) use the most orthogonal mid-point
+        ####
+#        # Check the orthogonality of each of the alternative mid-points
+#        ang1 = self.check_orthogonality(self._xva,self._yva)
+#        ang2 = self.check_orthogonality(self._xvb,self._yvb)
+#        
+#        # Now go through and decide which point to use based on orthogonality
+#        self.orthog = np.zeros((self.Nc,))
+#        self.xv = np.zeros((self.Nc,))
+#        self.yv = np.zeros((self.Nc,))
+#        for i in range(self.Nc):
+#            if ang1[i]<ang2[i]:
+#                self.orthog[i]=ang1[i]
+#                self.xv[i]=self._xva[i]
+#                self.yv[i]=self._yva[i]
+#            else:
+#                self.orthog[i]=ang2[i]
+#                self.xv[i]=self._xvb[i]
+#                self.yv[i]=self._yvb[i]
+                
+        ####
+        # Option 2) Use the area centroid (circumcenter for triangles)
+        ### 
+        self.xv = self.xca.copy()
+        self.yv = self.yca.copy()
+                
+
+    def calc_area(self):
+        """
+        Calculates the area of each cell
+        """
+        
+        Ac = np.zeros((self.Nc,))
+        
+        #for ii in range(self.Nc):
+        #     nf = self.nfaces[ii]
+        #     Ac[ii] = polyarea(self.xp[self.cells[ii,0:nf]],
+        #        self.yp[self.cells[ii,0:nf]],nf)            
+
+        for N in range(3,self.MAXFACES+1):
+            ind = self.nfaces==N
+            cells = self.cells[ind,0:N]
+            Ac[ind] = polyarea(self.xp[cells[:,0:N]],self.yp[cells[:,0:N]],N)            
+            #Ac[ind] = signed_area(xp[cells[:,0:N]],yp[cells[:,0:N]],N)       
+        
+        return Ac
+    
+    def ensure_ccw(self):
+        """
+        Ensure that the nodes are rotated counter-clockwise
+        """
+	###
+	# Cython wrapper
+	###
+        ugridutils.ensure_ccw(self.cells, self.nfaces, self.Ac)
+	
+	#####
+	## Pure python version
+	#####
+        ##Ac = self.calc_area()
+        ##cells_ccw = np.zeros_like(self.cells)
+        #for i in range(self.Nc):
+        #    ctmp=self.cells[i,0:self.nfaces[i]]#.copy()
+        #    if self.Ac[i] < 0:
+        #        #print 'Cell %d is clock-wise - reversing.'%i
+        #        self.cells[i,0:self.nfaces[i]] = ctmp[::-1] # reverse order
+        #    else:
+        #        self.cells[i,0:self.nfaces[i]] =  ctmp
+        #
+        ##return cells_ccw
+    
+    def edge_centers(self):
+        
+        xp = np.array(self.xp)
+        yp = np.array(self.yp)
+
+        p1 = self.edges[:,0]
+        p2 = self.edges[:,1]
+
+        nc1 = self.grad[:,0].copy()
+        nc2 = self.grad[:,1].copy()
+
+        nc1[nc1<0]=nc2[nc1<0]
+
+        # Edge coordiainte is the intersection of the voronoi edge 
+        # and Delaunay edge
+        tx = self.xp[p2] - self.xp[p1] # Order ensure t is CCW
+        ty = self.yp[p2] - self.yp[p1]
+        mag = np.sqrt(tx*tx + ty*ty)
+        tx /= mag
+        ty /= mag
+
+        xdott = (self.xv[nc1]-self.xp[p1])*tx +\
+            (self.yv[nc1]-self.yp[p1])*ty
+
+        self.xe = self.xp[p1]+xdott*tx
+        self.ye = self.yp[p1]+xdott*ty
+
+        self.tx = tx
+        self.ty = ty
+
+        
+        # Assume edge is at the mid-point
+        #self.xe = 0.5 * (xp[self.edges[:,0]] + xp[self.edges[:,1]])
+        #self.ye = 0.5 * (yp[self.edges[:,0]] + yp[self.edges[:,1]])
+
+    def calc_Aj(self):
+        """
+        Calculate the area of the triangle made up of the lines between 
+        the two edge nodes and the Voronoi point
+
+        Assumes orthogonality
+        """
+        p1 = self.edges[:,0]
+        p2 = self.edges[:,1]
+
+        face = self.face.copy()
+        cellmask = self.face==self._FillValue
+        face[cellmask]=0
+        
+        de1 = dist(self.xp[p1],self.xe,self.yp[p1],self.ye)
+        de2 = dist(self.xp[p2],self.xe,self.yp[p2],self.ye)
+
+        self.Aj = 0.5*self.DEF*de1[face] + 0.5*self.DEF*de2[face]
+
+        self.Aj[cellmask]=0
+        self.Aj = np.ma.masked_array(self.Aj,mask=cellmask)
+
+    def calc_dg(self):
+        """
+        Manually calculate the distance between voronoi points, 'dg'
+        """
+        
+        #grad = self.grad.copy()
+        #Ne = self.Nedges()
+
+        #for ii in range(Ne):
+        #    if grad[ii,0]==-1:
+        #        grad[ii,0]=grad[ii,1]
+        #    elif grad[ii,1]==-1:
+        #        grad[ii,1]=grad[ii,0]
+                
+                
+        x1 = self.xv[self.grad[:,0]]
+        x2 = self.xv[self.grad[:,1]]
+        y1 = self.yv[self.grad[:,0]]
+        y2 = self.yv[self.grad[:,1]]
+
+        # For boundaries set dg as twice the distance to the edge
+        ind1 = self.grad[:,0]==-1
+        ind2 = self.grad[:,1]==-1
+
+        x1[ind1]=self.xe[ind1]
+        y1[ind1]=self.ye[ind1]
+        x2[ind2]=self.xe[ind2]
+        y2[ind2]=self.ye[ind2]
+
+        self.dg = dist(x1,x2,y1,y2)
+
+        self.dg[ind1] *= 2.
+        self.dg[ind2] *= 2.
+
+
+
+    def calc_def(self):
+        """
+        Calculate the edge to face(cell) distance
+        
+        dimensions: Nc x maxfaces
+        """
+        #ne = np.array(self.face)
+
+        #cellmask = self.face==FILLVALUE
+
+        #ne[cellmask]=0
+
+        #DEF = dist(self.xv,self.xe[ne].T,self.yv,self.ye[ne].T).T
+
+        #DEF = np.ma.masked_array(DEF,mask=cellmask)
+
+        # SUNTANS code
+        Nc = self.Ncells()
+        maxfaces = self.nfaces.max()
+
+        self.DEF = np.zeros((Nc,maxfaces))
+        
+        for i in range(Nc):
+            nf = self.nfaces[i]
+            for n in range(nf):
+                ne = self.face[i,n]
+                e = self.edges[ne,0]
+                #self.DEF[i,n] = -( (self.xv[n]-self.xp[e])*self.n1[ne] +\
+                #    (self.yv[n]-self.yp[e])*self.n2[ne]) *\
+                #    self.normal[i,n]
+                self.DEF[i,n] = dist(self.xv[i],self.xe[ne],\
+                    self.yv[i],self.ye[ne])
+
+                
+
+    def calc_dfe(self):
+        """
+        Calculate the face(cell) to edge distance
+
+        dimensions: Ne x 2
+        """
+        #grad = self.grad.copy()
+        #mask = grad==-1
+        #grad[mask]=0
+        # For boundaries set dg as twice the distance to the edge
+        ind1 = self.grad[:,0]==-1
+        ind2 = self.grad[:,1]==-1
+
+        Ne = self.Nedges()
+
+        self.dfe = np.zeros((Ne,2))
+
+        # Edge one
+        x1 = self.xv[self.grad[:,0]]
+        x2 = self.xe
+        y1 = self.yv[self.grad[:,0]]
+        y2 = self.ye
+
+        x1[ind1] = self.xv[self.grad[ind1,1]]
+        y1[ind1] = self.yv[self.grad[ind1,1]]
+
+        self.dfe[:,0] = dist(x1,x2,y1,y2)
+
+        # Edge one
+        x1 = self.xv[self.grad[:,1]]
+        x2 = self.xe
+        y1 = self.yv[self.grad[:,1]]
+        y2 = self.ye
+
+        x1[ind2] = self.xv[self.grad[ind2,0]]
+        y1[ind2] = self.yv[self.grad[ind2,0]]
+
+        self.dfe[:,1] = dist(x1,x2,y1,y2)
+ 
+
+
+    def calc_df(self):
+        """
+        Calculate the length of each edge segment
+        """
+        x = self.xp[self.edges]
+        y = self.yp[self.edges]
+
+        self.df = dist(x[:,0],x[:,1],y[:,0],y[:,1])
+
+    def calc_tangent(self):
+        """
+        Calculate the tangential vector for the edges of each cell
+
+        NOT USED - calculated in self.edge_centers()
+        """
+        dx = np.zeros(self.cells.shape)    
+        dy = np.zeros(self.cells.shape)  
+
+        dx[:,0:-1] = self.xp[self.cells[:,1::]] - self.xp[self.cells[:,0:-1]]               
+        dy[:,0:-1] = self.yp[self.cells[:,1::]] - self.yp[self.cells[:,0:-1]]               
+
+        for ii in range(self.Nc):
+            dx[ii,self.nfaces[ii]-1] = self.xp[self.cells[ii,0]] -\
+                self.xp[self.cells[ii,self.nfaces[ii]-1]]  
+            dy[ii,self.nfaces[ii]-1] = self.yp[self.cells[ii,0]] -\
+                self.yp[self.cells[ii,self.nfaces[ii]-1]]  
+
+        mag = np.sqrt(dx*dx + dy*dy)
+        
+        self.tx = dx/mag
+        self.ty = dy/mag
+
+        #self.nx = -self.ty
+        #self.ny = self.tx
+
+        #return self._tx, self._ty, self._mag
+
+    def calc_unitnormal(self):
+        """
+        Calculate the unit normal vector at each edge
+        """
+
+        dx = self.xp[self.edges[:,1]] - self.xp[self.edges[:,0]]
+        dy = self.yp[self.edges[:,1]] - self.yp[self.edges[:,0]]
+
+        mag = np.sqrt(dx*dx + dy*dy)
+        
+        self.n1 = -dy/mag
+        self.n2 = dx/mag
+
+        ## SUNTANS code
+        #Ne = self.Nedges()
+        #self.n1 = np.zeros((Ne,))
+        #self.n2 = np.zeros((Ne,))
+        #self.dg = np.zeros((Ne,))
+        #for j in range(Ne):
+        #    nc1 = self.grad[j,0]
+        #    nc2 = self.grad[j,1]
+
+        #    if nc1 != -1 and nc2 != -1:
+        #        self.n1[j] = self.xv[nc1] - self.xv[nc2]
+        #        self.n2[j] = self.yv[nc1] - self.yv[nc2]
+        #        self.dg[j] = np.sqrt( self.n1[j]**2. + self.n2[j]**2.)
+        #        self.n1[j] = self.n1[j] /self.dg[j]
+        #        self.n2[j] = self.n2[j] /self.dg[j]
+
+        #    else:
+        #        xc = self.xe[j]
+        #        yc = self.ye[j]
+
+        #        if nc1 == -1:
+        #            self.n1[j] = xc - self.xv[nc2]
+        #            self.n2[j] = yc - self.yv[nc2]
+        #        else:
+        #            self.n1[j] = self.xv[nc1] - xc
+        #            self.n2[j] = self.yv[nc1] - yc
+
+        #        self.dg[j] = np.sqrt( self.n1[j]**2. + self.n2[j]**2.)
+        #        self.n1[j] /= self.dg[j]
+        #        self.n2[j] /= self.dg[j]
+        #        self.dg[j] *= 2.
+
+
+
+    def calc_normal(self):
+        """
+        Create the normal array
+        """
+        Nc = self.Ncells()
+
+        self.normal=np.zeros((Nc,self.MAXFACES))
+        
+        for ii in range(Nc):
+            for nf in range(self.nfaces[ii]):
+                if self.grad[self.face[ii,nf],0]==ii:
+                    self.normal[ii,nf]=-1
+                else:
+                    self.normal[ii,nf]=1
+
+        
+    def make_edges_from_cells_sparse(self):
+        """
+        Utilize sparse matrices to find the unique edges
+        
+        This is slower than make_edges_from_cells() but is more robust for 
+        hybrid grid types. 
+        """
+        A = sparse.lil_matrix((self.Npoints(),self.Npoints()))
+        Vp1 = sparse.lil_matrix((self.Npoints(),self.Npoints()))
+        Vp2 = sparse.lil_matrix((self.Npoints(),self.Npoints()))
+        
+        for i in range(self.Ncells()):
+
+            for j in range(self.nfaces[i]):
+
+                p1 = self.cells[i,j]
+                p2 = self.cells[i,(j+1)%self.nfaces[i]]
+                
+                if A[p1,p2]==0:
+                    Vp1[p1,p2] = i
+                    Vp1[p2,p1] = i
+                else:
+                    Vp2[p1,p2] = i
+                    Vp2[p2,p1] = i
+                
+                # Graph is undirected so should be symmetric
+                A[p1,p2] += 1.0
+                A[p2,p1] += 1.0
+    
+        I,J,V = sparse.find(A)
+        Ne = I.shape[0]
+        #edges = [[I[k], J[k], A[I[k], J[k]]!=2, Vp1[I[k], J[k]]-1,Vp2[I[k], J[k]]-1] for k in range(Ne) if I[k]<=J[k]]
+        edges = [[I[k], J[k], A[I[k], J[k]]!=2, Vp1[I[k], J[k]],Vp2[I[k], J[k]]] for k in range(Ne) if I[k]<=J[k]]
+        
+        edges = np.array(edges,dtype=int)
+        Ne = edges.shape[0]
+        self.edges = np.array([edges[ii,0:2] for ii in range(Ne)])
+        self.mark = np.array([edges[ii,2] for ii in range(Ne)])
+        self.grad = np.array([edges[ii,3:5] for ii in range(Ne)])
+        
+        # Now go back and set grad[2] = -1 for boundary cells
+        for k in range(Ne):
+            if self.mark[k]==1 and self.grad[k,1]==0:
+                self.grad[k,1]=-1
+    
+    def check_orthogonality(self,xv,yv):
+        """
+        Checks the orthogonality of the grid cells with index 'cell' and mid-points
+        'xv, yv'
+        
+        Returns the maximum deviation from 90 degrees of each line connecting the 
+        edge point to the cell mid-point
+        """
+        if self.VERBOSE:
+            print('calculating orthogonality...')
+        nc = xv.shape[0]
+        orthoang = np.zeros((nc,))
+        pi_on_2 = 0.5*np.pi
+        
+        for i in range(nc):
+            
+            maxangle = 0.0
+            for j in range(self.nfaces[i]):
+                # Find the two node values
+                pnt_a = self.cells[i,j]
+                pnt_b =self.cells[i,(j+1)%self.nfaces[j]]
+                
+                # Find the edge index
+                edg = self.find_edge([pnt_a,pnt_b])
+                
+                # Create a two lines and find the angle between them
+                P0 = Point(self.xe[edg],self.ye[edg])
+                #P1a = Point(self.xp[pnt_a],self.yp[pnt_a])
+                P1 = Point(self.xp[pnt_b],self.yp[pnt_b])
+                P2 = Point(xv[i],yv[i])
+                L1 = Line(P0,P1)
+                L2 = Line(P0,P2)
+
+                ang = np.abs(pi_on_2 - L1.angle(L2))
+                if ang > maxangle:
+                    maxangle=ang
+                    
+            orthoang[i]=maxangle
+        
+        return orthoang
+
+    ###########################
+    # Searching functions (from sunpy.py)
+    ###########################
+    def find_cell(self,x,y):
+        """
+        Return the cell index that x and y lie inside of 
+
+        return -1 for out of bounds
+        """
+        if '_tsearch' not in self.__dict__:
+            self._tsearch=GridSearch(self.xp,self.yp,self.cells,nfaces=self.nfaces,\
+                edges=self.edges,mark=self.mark,grad=self.grad,neigh=self.neigh,\
+                xv=self.xv,yv=self.yv)
+        
+        return self._tsearch(x,y)
+
+
+        
+    ###########################
+    # Input output functions
+    ###########################
+    def writeNC(self,outfile):
+        """
+        Export the grid variables to a netcdf file
+        """
+        from netCDF4 import Dataset
+        from sfoda.dataio.suntans.suntans_ugrid import ugrid
+        
+        nc = Dataset(outfile, 'w', format='NETCDF4_CLASSIC')
+        nc.Description = 'Unstructured grid file'
+        nc.Author = ''
+        #nc.Created = datetime.now().isoformat()
+
+        nc.createDimension('Nc', self.Nc)
+        nc.createDimension('Np', self.Np)
+        try:
+            nc.createDimension('Ne', self.Ne)
+        except:
+            print('No dimension: Ne')
+        nc.createDimension('Nk', self.Nkmax)
+        nc.createDimension('Nkw', self.Nkmax+1)
+        nc.createDimension('numsides', self.MAXFACES)
+        nc.createDimension('two', 2)
+        nc.createDimension('time', 0) # Unlimited
+        
+        # Write the grid variables
+        def write_nc_var(var, name, dimensions, attdict, dtype='f8'):
+            tmp=nc.createVariable(name, dtype, dimensions)
+            for aa in list(attdict.keys()):
+                tmp.setncattr(aa,attdict[aa])
+            nc.variables[name][:] = var
+    
+        gridvars = ['suntans_mesh','cells','face','nfaces',\
+             'edges','neigh','grad','xp','yp','xv','yv','xe','ye',\
+            'normal','n1','n2','df','dg','def',\
+            'Ac','dv','dz','z_r','z_w','Nk','Nke','mark']
+        
+        self.Nk += 1 # Set to one-base in the file (reset to zero-base after)
+        self.suntans_mesh=[0]  
+        for vv in gridvars:
+            if vv in self.__dict__:
+                if self.VERBOSE:
+                    print('Writing variables: %s'%vv)
+
+                write_nc_var(self[vv],vv,\
+                        ugrid[vv]['dimensions'],\
+                        ugrid[vv]['attributes'],\
+                        dtype=ugrid[vv]['dtype'])
+            
+            # Special treatment for "def"
+            if vv == 'def' and 'DEF' in self.__dict__:
+                if self.VERBOSE:
+                    print('Writing variables: %s'%vv)
+                write_nc_var(self['DEF'],vv,ugrid[vv]['dimensions'],\
+                        ugrid[vv]['attributes'],\
+                        dtype=ugrid[vv]['dtype'])
+
+        nc.close()
+        self.Nk -= 1 # set back to zero base
+
+
+    def write2suntans(self,suntanspath):
+        """
+        Write to suntans grid format ascii files
+        """
+        ### Save cells.dat into hybrid grid format
+        f = open(suntanspath+'/cells.dat','w')
+    
+        for ii in range(self.Ncells()):
+            outstr = '%d %10.6f %10.6f '%(self.nfaces[ii],self.xv[ii],self.yv[ii])
+            for nn in range(self.nfaces[ii]):
+                outstr += '%d '%self.cells[ii,nn]
+    
+            for nn in range(self.nfaces[ii]):
+                outstr += '%d '%self.neigh[ii,nn]
+    
+            outstr += '\n'
+            f.write(outstr)
+        
+        f.close()
+        
+        # Save edges.dat
+        f = open(suntanspath+'/edges.dat','w')
+    
+        for ee,m,gg in zip(self.edges,self.mark,self.grad):
+            e1=ee[0]
+            e2=ee[1]
+            g1=gg[0]
+            g2=gg[1]
+            f.write('%d %d  %d  %d  %d  0\n'%(e1,e2,m,g1,g2))
+    
+        f.close()
+        
+        # Save to points.dat
+        f = open(suntanspath+'/points.dat','w')
+    
+        for x,y in zip(self.xp,self.yp):
+            f.write('%10.6f %10.6f  0\n'%(x,y))
+    
+        f.close()
+        #print 'Completed gmsh to suntans conversion.'
+        
+    def create_dual_grid(self,minfaces=3,outpath=None):
+        """
+        Create a new grid using the dual of the current grid. 
+        
+        Returns a new hybridgrid object. Set outpath to save directly to a suntans
+        grid.
+        """
+        # Locate the points forming each cell
+        
+        # The centre points are now the nodes
+        xp = self.xv
+        yp = self.yv
+        
+        # ...and the nodes are now the centre point
+        xv = self.xp
+        yv = self.yp
+        
+        # Find the number of faces of each cell
+        Np = self.Npoints()
+        nfaces = np.array([len(self.pnt2cells(ii)) for ii in range(Np)])
+        
+        maxfaces = nfaces.max()
+        
+        # Reorder the nodes into anti-clockwise order
+        def reordercells(ii):
+            cell = np.array(list(self.pnt2cells(ii)))
+            # Find the order of the points that form a non-intersecting polygon
+            xy = np.array([xp[cell],yp[cell]])
+            # calculate the angles from the centre point and sort them
+            ang = np.arctan2(xy[0,:]-xv[ii],xy[1,:]-yv[ii])
+            
+            order = np.argsort(ang)
+            
+            return cell[order]
+            
+        cells_list = list(map(reordercells,list(range(Np))))
+        
+        cells = -1*np.ones((Np,maxfaces),np.int)
+        for ii in range(Np):
+            cells[ii,0:nfaces[ii]]=cells_list[ii]
+            
+        # Now remove cells with less than 'minfaces' points
+        ind = nfaces>=minfaces
+        
+        cells = cells[ind,:]
+        nfaces =  nfaces[ind]
+        xv = xv[ind]
+        yv = yv[ind]
+
+        # Now go an delete unused nodes (parmetis doesn't like them)
+        #self.delete_unused_nodes()
+
+        dualgrd = HybridGrid(xp,yp,cells,nfaces=nfaces,xv=xv,yv=yv)
+        
+        if not outpath is None:
+            dualgrd.write2suntans(outpath)
+            
+        return dualgrd
+
+    def to_metismesh(self):
+        """
+        Creates the mesh vectors 'eptr' and 'eind' required by
+        metis functions
+        """
+        eptr = np.zeros((self.Nc+1))
+        eptr[1:] = np.cumsum(self.nfaces)
+        #eptr = eptr - eptr[0]
+
+        ne = self.nfaces.sum()
+
+        eind = np.zeros((ne,))
+
+        pt1 = 0
+        for i in range(self.Nc):
+            nf = self.nfaces[i]
+            pt2 = pt1+nf
+            eind[pt1:pt2] = self.cells[i,0:nf]
+            pt1 = pt2+0
+
+        return eptr.astype(np.int32), eind.astype(np.int32)
+
+    def create_graph(self):
+        """
+        Create a cell graph in the format used by Metis
+        """
+        # Count the total number of neighbours (graph edges)
+        idx = self.neigh != -1
+        Nge = np.sum(idx)
+        adjncy = self.neigh[idx]
+
+        # adjacency matrix
+        nneigh = np.sum(idx,axis=1)
+        xadj = np.zeros((self.Nc+1))
+        xadj[1:] = np.cumsum(nneigh)
+
+        return xadj.astype(np.int32), adjncy.astype(np.int32)
+
+
+    ######################
+    # TriGrid functions  #
+    # (with adjustments) #
+    ######################
+    def make_edges_from_cells(self):
+        ###
+        # Cython version
+        ###
+        self.pnt2cells(0)
+        self.edges, self.mark, self.grad = \
+            ugridutils.make_edges_from_cells(\
+                self.cells,
+                self.nfaces,\
+                self._pnt2cells)
+        ###
+        # Pure python
+        ###
+        ## iterate over cells, and for each cell, if it's index
+        ## is smaller than a neighbor or if no neighbor exists,
+        ## write an edge record
+        #edges = []
+        #default_marker = 0
+
+        ## this will get built on demand later.
+        #self._pnt2edges = None
+        #
+        #for i in range(self.Ncells()):
+        #    # find the neighbors:
+        #    # the first neighbor: need another cell that has
+        #    # both self.cells[i,0] and self.cells[i,1] in its
+        #    # list.
+        #    my_set = set([i])
+        #    #n = [-1,-1,-1]
+        #    n = self.nfaces[i] * [-1]
+        #    #for j in 0,1,2:
+        #    #for j in range(self.MAXFACES):
+        #    for j in range(self.nfaces[i]):
+        #        pnt_a = self.cells[i,j]
+        #        #pnt_b = self.cells[i,(j+1)%3]
+        #        #pnt_b = self.cells[i,(j+1)%self.MAXFACES]
+        #        pnt_b = self.cells[i,(j+1)%self.nfaces[i]]
+        #        
+        #            
+        #        adj1 = self.pnt2cells(pnt_a) # cells that use pnt_a
+        #        adj2 = self.pnt2cells(pnt_b) # cells that use pnt_b
+
+        #        # the intersection is us and our neighbor
+        #        #  so difference out ourselves...
+        #        neighbor = adj1.intersection(adj2).difference(my_set)
+        #        # and maybe we ge a neighbor, maybe not (we're a boundary)
+        #        if len(neighbor) == 1:
+        #            n = neighbor.pop()
+        #        else:
+        #            n = -1
+        #            
+        #        if n==-1 or i<n:
+        #            # we get to add the edge:
+        #            edges.append((pnt_a,
+        #                          pnt_b,
+        #                          default_marker,
+        #                          i,n))
+
+        ##self.edge = np.array(edges,np.int32)
+        #Ne = len(edges)
+        #edges = np.array(edges)
+        #self.edges = np.array([edges[ii,0:2] for ii in range(Ne)])
+        #self.mark = np.array([edges[ii,2] for ii in range(Ne)])
+        #self.grad = np.array([edges[ii,3:5] for ii in range(Ne)])
+            
+            
+    def calc_markcell(self, mark):
+        """
+        Calculates the cell-type based on the edge marker
+
+        """
+        #mask = self.cells.mask.copy()
+        mask = self.cells==self._FillValue
+        ctypes = self.mark[self.face]
+        ctypes[mask] = 0
+
+        return ctypes.max(axis=1)
+
+    def check_missing_bcs(self):
+        """
+        Check for missing BCs
+        """        
+        missing_bcs = (self.mark==0) & (self.grad[:,1]<0)
+        n_missing = missing_bcs.sum()
+        if any(missing_bcs):
+
+            if self.VERBOSE:
+                print("WARNING: %d edges are on the boundary but have marker==0"%n_missing)
+                print("Assuming they are closed boundaries!")
+
+            self.mark[missing_bcs] = 1
+
+        
+    def make_neigh_from_grad(self):
+        """
+        Find the neighbouring cells from the face and grad arrays
+
+        This ensures that the neighbours are in correct order
+        """
+        return -1
+
+    def make_neigh_from_cells(self):
+        """
+        Find the neighbouring cells
+        """
+        ###
+        # Cython wrapper
+        ###
+        # Make sure the hash table is built
+        self.pnt2cells(0)
+        self.neigh = ugridutils.make_neigh_from_cells(
+            self.cells, self.nfaces, self._pnt2cells)
+        
+        ###
+        # Pure python
+        ###	
+        #self.neigh = np.zeros((self.Ncells(),self.MAXFACES),np.int)
+        #for i in range(self.Ncells()):
+        #    # find the neighbors:
+        #    # the first neighbor: need another cell that has
+        #    # both self.cells[i,0] and self.cells[i,1] in its
+        #    # list.
+        #    my_set = set([i])
+        #    #n = self.MAXFACES * [-1]
+        #    n = self.nfaces[i] * [-1]
+        #    #for j in range(self.MAXFACES):
+        #    for j in range(self.nfaces[i]):
+        #        adj1 = self.pnt2cells(self.cells[i,j])
+        #        adj2 = self.pnt2cells(self.cells[i,(j+1)%self.nfaces[i]])
+        #        #adj2 = self.pnt2cells(self.cells[i,(j+1)%self.MAXFACES])
+        #        neighbor = adj1.intersection(adj2).difference(my_set)
+        #        if len(neighbor) == 1:
+        #            n[j] = neighbor.pop()
+        #    
+        #    self.neigh[i,0:self.nfaces[i]] = n
+        
+    def pnt2cells(self,pnt_i):
+        if self._pnt2cells is None:
+            # Cython wrapper
+            self._pnt2cells = ugridutils.create_pnt2cells(
+                self.cells, self.nfaces)
+            ###
+            # Pure python
+            ###	
+            ## build hash table for point->cell lookup
+            #self._pnt2cells = {}
+            #for i in range(self.Ncells()):
+            #    #for j in range(self.MAXFACES):
+            #    for j in range(self.nfaces[i]):
+	    #        cc = self.cells[i,j]
+            #        if not self._pnt2cells.has_key(cc):
+            #            self._pnt2cells[cc] = set()
+            #        self._pnt2cells[cc].add(i)
+
+        # This accounts for unconnected points
+        if pnt_i in self._pnt2cells:
+            return self._pnt2cells[pnt_i]
+        else:
+            return []
+        
+    def cell2edges(self,cell_i):
+        if self.cells[cell_i,0] == -1:
+            raise "cell %i has been deleted"%cell_i
+        
+        # return indices to the three edges for this cell:
+        pnts = self.cells[cell_i] # the vertices
+
+        # the k-th edge is opposite the k-th point, like in CGAL
+        nf = self.nfaces[cell_i]
+
+        edges = [ self.find_edge( (pnts[(i)%nf], pnts[(i+1)%nf]) ) for i in range(nf) ]
+        #edges = [ self.find_edge( (pnts[(i+1)%nf], pnts[(i+2)%nf]) ) for i in range(nf) ]
+        # This ordering ensures that the 'face' and 'neigh' arrays correspond
+        #edges = [ self.find_edge( (pnts[(i+1)%nf], pnts[(i+2)%nf]) ) for i in range(-1,nf-1) ]
+        return edges
+
+    _cell_edge_map = None
+    def cell_edge_map(self):
+        """ cell2edges for the whole grid
+        return an integer valued [Nc,3] array, where [i,k] is the edge index
+        opposite point self.cells[i,k]
+
+        N.B. this is not kept up to date when modifying the grid.
+        """
+        # Cython
+        if self._pnt2edges is None:
+           self._pnt2edges = ugridutils.create_pnt2edges(self.edges, 
+               self.mark, DELETED_EDGE)
+           self._cell_edge_map = ugridutils.cell_edge_map(self.cells,
+                self.nfaces, self._pnt2edges)
+
+        return self._cell_edge_map
+        ####
+        # Pure python
+        ####
+        #if self._cell_edge_map is None:
+        #    cem = 999999*np.ones( (self.Ncells(),self.MAXFACES), np.int32)
+
+        #    for i in xrange(self.Ncells()):
+        #        cem[i,0:self.nfaces[i]] = self.cell2edges(i)
+        #    self._cell_edge_map = cem
+        #return self._cell_edge_map
+
+    def pnt2edges(self,pnt_i):
+        if self._pnt2edges is None:
+            # print "building pnt2edges"
+            
+            p2e = {}
+            for e in range(self.Nedges()):
+                # skip deleted edges
+#                if self.edges[e,2] == DELETED_EDGE:
+#                    continue
+                if self.mark[e] == DELETED_EDGE:
+                    continue
+                
+                for p in self.edges[e,:2]:
+                    if p not in p2e:
+                        p2e[p] = []
+                    p2e[p].append(e)
+            self._pnt2edges = p2e
+
+        if pnt_i in self._pnt2edges:
+            return self._pnt2edges[pnt_i]
+        else:
+            return []
+    
+    def find_edge(self,nodes):
+    
+        el0 = self.pnt2edges(nodes[0])
+        el1 = self.pnt2edges(nodes[1])
+        for e in el0:
+            if e in el1:
+                return e
+        #raise NoSuchEdgeError,str(nodes)
+        return -1
+
+    def delete_unused_nodes(self):
+        """ any nodes which aren't in any cells or edges will be removed.
+        """
+        all_nodes = np.arange(self.Npoints())
+
+        cell_nodes = np.unique(np.ravel(self.cells))
+        edge_nodes = np.unique(np.ravel(self.edges[:,:2]))
+        #deleted_nodes = np.nonzero(np.isnan(self.points[:,0]))[0]
+
+        okay_nodes = np.unique( np.concatenate( (cell_nodes,edge_nodes) ) )
+
+        unused = np.setdiff1d(all_nodes,okay_nodes)
+
+        for n in unused:
+            self.delete_node(n)
+ 
+    def check_inputs(self):
+        """
+        Check that the inputs are the right type
+        """
+        vars = ['xp','yp','cells','nfaces']
+
+        for vv in vars:
+            val = getattr(self,vv)
+            if not val is None:
+                if not isinstance(val, np.ndarray):
+                     print('converting variable: %s'%vv)
+                     valout = np.asarray(val)
+                     setattr(self,vv,valout)
+
+        self.cells = self.cells.astype(np.int32)
+        self.nfaces = self.nfaces.astype(np.int64)
+        
+    def Nedges(self):
+        return len(self.edges)
+    def Ncells(self):
+        return len(self.cells)
+    def Npoints(self):
+        return len(self.xp)
+
+    def __getitem__(self,y):
+        x = self.__dict__.__getitem__(y)
+        return x
+ 
+#def signed_area(x,y,N):
+#    i = np.arange(N)
+#    ip1 = (i+1)%(N)
+#    #return 0.5*(points[i,0]*points[ip1,1] - points[ip1,0]*points[i,1]).sum()
+#    return 0.5*(x[...,i]*y[...,ip1] - x[...,ip1]*y[...,i])
+    
+
+###########################
+# Utility functions
+###########################
+        
+def polyarea(x,y,N):
+    """
+    Calculate the area of an arbitrary side polygon.
+    
+    Uses the formula here:
+        http://www.seas.upenn.edu/~sys502/extra_materials/Polygon%20Area%20and%20Centroid.pdf
+    """
+    
+    A = np.zeros(x.shape[:-1])
+    for i in range(N):
+        ip1 = (i+1)%(N)
+        A += x[...,i]*y[...,ip1] - x[...,ip1]*y[...,i]
+        
+    return 0.5*A
+    
+
+def centroid(x,y,N):
+    """
+    **NOT USED **
+    Calculate the centroid of an arbitrary side polygon.
+    
+    Uses the formula here:
+        http://www.seas.upenn.edu/~sys502/extra_materials/Polygon%20Area%20and%20Centroid.pdf
+    """
+    
+    A = polyarea(x,y,N)
+    
+    Cx = np.zeros(x.shape[:-1])
+    Cy = np.zeros(x.shape[:-1])
+    for i in range(N):
+        ip1 = (i+1)%(N)
+        tmp = x[...,i]*y[...,ip1] - x[...,ip1]*y[...,i]
+        
+        Cx += (x[...,i]+x[...,ip1])*tmp
+        Cy += (y[...,i]+y[...,ip1])*tmp
+        
+    fac = 1. / (6. * A)
+    
+    return fac*Cx, fac*Cy
+    
+def circumcenter(p1x,p1y,p2x,p2y,p3x,p3y):
+    refx = p1x.copy()
+    refy = p1y.copy()
+    
+    p1x -= refx # ==0.0
+    p1y -= refy # ==0.0
+    p2x -= refx
+    p2y -= refy
+    p3x -= refx
+    p3y -= refy
+
+    vcx = np.zeros( p1x.shape, np.float64)
+    vcy = np.zeros( p1y.shape, np.float64)
+    
+    # taken from TRANSFORMER_gang.f90
+    dd=2.0*((p1x-p2x)*(p1y-p3y) -(p1x-p3x)*(p1y-p2y))
+    b1=p1x**2+p1y**2-p2x**2-p2y**2
+    b2=p1x**2+p1y**2-p3x**2-p3y**2 
+    vcx=(b1*(p1y-p3y)-b2*(p1y-p2y))/dd + refx
+    vcy=(b2*(p1x-p2x)-b1*(p1x-p3x))/dd + refy
+    
+    return vcx,vcy
+    
+class Point:
+    def __init__(self,x,y):
+        self.x = x
+        self.y = y
+  
+class Line:
+    def __init__(self,P1,P2):
+        self.x = P2.x - P1.x
+        self.y = P2.y - P1.y
+  
+    def magnitude(self):
+        return np.sqrt (self.x**2 + self.y**2)
+    
+    def unitnormal(self):
+        """Finds the units normal vector
+        """
+        return -self.y/self.magnitude(),self.x/self.magnitude()
+        # or return self.y/self.magnitude(),-self.x/self.magnitude()
+        
+    def dot(self,L2):
+        """Dot product with another line
+        """
+        return self.x*L2.x + self.y*L2.y
+    
+    def angle(self,L2):
+        """Angle with another line
+        """
+        costheta = self.dot(L2)/(self.magnitude() * L2.magnitude())
+        return np.arccos(costheta)
+        
+
+def ccw(A,B,C):
+	return (C.y-A.y)*(B.x-A.x) > (B.y-A.y)*(C.x-A.x)
+
+def intersect(A,B,C,D):
+    """
+    Determines if lines connected by points A-B intersects C-D
+    """
+    return ccw(A,C,D) != ccw(B,C,D) and ccw(A,B,C) != ccw(A,B,D)
+
+def intersectvec(A,B,C,D):
+	return op.and_( op.ne(ccwvec(A,C,D),ccwvec(B,C,D)),op.ne(ccwvec(A,B,C),ccwvec(A,B,D)) )
+
+def ccwvec(A,B,C):
+    return op.gt( (C.y-A.y)*(B.x-A.x),(B.y-A.y)*(C.x-A.x) )
+
+def dist(x0,x1,y0,y1):
+    return np.sqrt( (x0-x1)**2. + (y0-y1)**2.)
+
+    
+    
+#P1a = Point(0.,0.)
+#P2a = Point(0.,1.)
+#P0a = Point(-3.,0.)
+#L1a = Line(P1a,P0a)
+#L2a = Line(P1a,P2a)
+#print L1a.angle(L2a)
