@@ -189,6 +189,7 @@ class Plot(HybridGrid):
         Based on MATLAB code sungradient.m
         """
         if self.face is None:
+            print("calc_all_properties triggered")
             self.calc_all_properties()
 
         def _GradientAtFace(phi,jj,k):
@@ -217,9 +218,11 @@ class Plot(HybridGrid):
         ne = self.face #edge-indices
         mask = ne == self._FillValue
         ne[mask]=0
-        
+                
         Gn_phi = _GradientAtFace(phi,ne,k)
         Gn_phi[mask]=0
+
+        #print(phi.shape, Gn_phi.shape, self.n1[ne].shape, self.DEF.shape, self.df[ne].shape)
         
         Gx_phi = Gn_phi * self.n1[ne] * self.DEF * self.df[ne]
         Gy_phi = Gn_phi * self.n2[ne] * self.DEF * self.df[ne]

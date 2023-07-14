@@ -167,6 +167,12 @@ class HybridGrid(object):
         self.calc_df()
         #self.calc_tangent()
         #self.calc_Aj()
+        
+        #print("dg", self.dg.shape)
+        #print("DEF", self.DEF.shape)
+        #print("dfe", self.dfe.shape)
+        #print("df", self.df.shape)
+
 
     ###################################
     # Geometry functions
@@ -411,6 +417,7 @@ class HybridGrid(object):
 
         self.dg[ind1] *= 2.
         self.dg[ind2] *= 2.
+        
 
 
 
