@@ -1,0 +1,31 @@
+#!/bin/csh
+#PBS -l walltime=24:00:00
+#PBS -q mpi_1
+#PBS -l select=1:ncpus=28:mem=100g
+
+# tracejob 8509847
+# http://datadmin.ifremer.fr/ganglia/
+
+# cd to the directory you submitted your job
+cd $PBS_O_WORKDIR
+
+setenv PATH ${HOME}/.miniconda3/envs/equinox/bin:${PATH}
+
+setenv OMP_NUM_THREADS 1
+setenv NUMEXPR_NUM_THREADS 1
+setenv MKL_NUM_THREADS 1
+setenv OPENBLAS_NUM_THREADS 1
+
+# core computation
+date
+#echo $NAME $ZOOM $START $END
+#python movies.py $NAME $ZOOM $START $END
+python movies.py
+date
+
+# qsub movies.pbs
+# qsub -v NAME="nwa_vorticity",ZOOM=cp_large,START="2013/09/02T00:00",END="2013/09/04T00:00" movies.pbs
+# qsub -v NAME="nwa_vorticity",ZOOM=cp_large,START="2013/09/02T00:00",END="2013/09/02T07:00" movies.pbs
+
+# cleanup dask workers
+#python /home1/datahome/aponte/mit_equinox/launch/kill.py
