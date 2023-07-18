@@ -4,9 +4,12 @@ import os
 
 import xarray as xr
 import pandas as pd
+import numpy as np
 
 from . import sunxarray as sunx
 from . import myproj
+
+proj = myproj.MyProj("merc")
 
 # aurelien's libraries
 from mitequinox.utils import load_swot_tracks
@@ -31,36 +34,45 @@ moorings_pd = (pd.DataFrame(moorings)
 )
 
 # areas of interest
-area_cp = (122, 124, -15, -13)
-area_cp_large = (121, 125, -16, -12)
-area_large = (108, 130, -20, -8)
-area_very_large = (108, 145, -23, -3)
-
+bounds = dict(cp=(122, 124, -15, -13),
+              cp_large=(121, 125, -16, -12),
+              central=(118, 125, -18.5, -13),
+              ridge=(120.5, 122, -17.5, -15),
+              large=(108, 130, -20, -8),
+              very_large=(108, 145, -23, -3),
+             )
 
 # ------------------------------ plotting ----------------------------------------------------
 
 # kwargs for maps
-mapkw_cp = dict(extent = area_cp, land=None, coastline="10m", figsize=(7,7))
-mapkw_cp_large = dict(extent = area_cp_large, land=None, coastline="10m", figsize=(7,7))
-mapkw_large = dict(extent = area_large, land="10m", coastline="10m", figsize=(8,5))
-mapkw_very_large = dict(extent = area_very_large, land="10m", coastline="10m", figsize=(10,5))
+mapkw_default = dict(extent = bounds["large"], land="10m", coastline="10m", figsize=(8,5))
 
 def map_init(zoom, bathy=None, tracks=True, bathy_kw=None, **kwargs):
 
+    mapkw = dict(**mapkw_default)
+    mapkw["extent"] = bounds[zoom]
     if zoom == "cp":
-        mapkw = dict(**mapkw_cp)
+        mapkw.update(land=None,  figsize=(7,7))
         clabel=True
         bathy_lvls = [100, 200, 400, 1000]
     elif zoom == "cp_large":
-        mapkw = dict(**mapkw_cp_large)
+        mapkw.update(land=None,  figsize=(7,7))
         clabel=True
         bathy_lvls = [100, 200, 400, 1000]
+    elif zoom == "central":
+        mapkw.update(figsize=(9,7))
+        clabel=False
+        bathy_lvls = [100, 200, 1000]
+    elif zoom == "ridge":
+        mapkw.update(figsize=(5,8))
+        clabel=False
+        bathy_lvls = [100, 200, 1000]
     elif zoom == "large":
-        mapkw = dict(mapkw_large)
+        mapkw.update(figsize=(8,5))
         clabel=False
         bathy_lvls = [200, 1000]    
     elif zoom == "very_large":
-        mapkw = dict(mapkw_very_large)
+        mapkw.update(figsize=(10,5))
         clabel=False
         bathy_lvls = [200, 1000] 
         
@@ -87,14 +99,19 @@ def map_init(zoom, bathy=None, tracks=True, bathy_kw=None, **kwargs):
     
     return fig, ax
     
-def plot_moorings(ax, **kwargs):
-    dkwargs = dict(ax=ax, x="longitude", y="latitude", 
-                   c="w", s=100, edgecolors="k", marker="*",
+def plot_moorings(ax, moorings=None, **kwargs):
+    dkwargs = dict(c="w", s=100, edgecolors="k", marker="*",
                    zorder=30,
                    transform=crs, 
                   )
     dkwargs.update(**kwargs)
-    moorings_pd.plot.scatter(**dkwargs)
+    moorings_pd.plot.scatter(ax=ax, x="longitude", y="latitude", **dkwargs)
+    if moorings is not None:
+        for p in moorings.Nc:
+            m = moorings.sel(Nc=p)
+            ax.scatter(m.lonv, m.latv, **dkwargs)
+            #ax.text(lon, lat, f"{int(m.Nc)}", size=10, transform=crs, zorder=20)        
+    
     
 def plot_swot_tracks(ax):
     tracks = load_swot_tracks(bbox=(100, 150, -25, 0))["swath"]
@@ -114,7 +131,23 @@ def plot_swot_tracks(ax):
         **swot_kwargs,
     )
     
-        
+def plot_velocity(ax, dsuv, 
+                  di=1,
+                  uref=1., 
+                  xref=.8, yref=.9, # xref=.7, yref=.88
+                  **kwargs
+                 ):
+    """ plot velocity field """
+    dkwargs = dict(scale=1e1, add_guide=False)
+    dkwargs.update(**kwargs)
+    q = (dsuv
+         .isel(lon=slice(0,None,di), lat=slice(0,None,di))
+         .plot
+         .quiver("lon", "lat", "u", "v", ax=ax, transform=crs, **dkwargs)
+    )
+    ax.quiverkey(q, xref, yref, uref, label=f'{uref}m/s', 
+                 labelpos='E', coordinates="figure",
+                )
 
 # ------------------------------ suntans -------------------------------------------------
 
@@ -132,16 +165,29 @@ def load_grd():
     grd = xr.open_dataset(nc)
     return grd
 
-def zoom(ds, area):
-    """ not sure this is used at the end """
-    ds = ds.where(  (ds.xv>=area[0]) & (ds.xv<=area[1]) 
-                  & (ds.yv>=area[2]) & (ds.yv<=area[3]), drop=True)
+def load_moorings():
+    nc = os.path.join(suntans_dir, "NWS_2km_GLORYS_hex_2013_2014_Nk80dt60_Profile.nc")
+    mo = xr.open_dataset(nc)
+    mo = mo.set_coords("dz")
+    lon, lat = proj.to_ll(mo["xv"], mo["yv"])
+    mo = mo.assign_coords(lonv=("Nc", lon), latv=("Nc", lat))
+    return mo
+
+def find_point_index(lon, lat, grd):
+    """ find index of point closest to lon, lat"""
+    d = (grd.xv - lon)**2 + (grd.yv - lat)**2
+    return int(d.argmin().compute())
+
+def zoom(ds, area, x="xv", y="yv"):
+    """ select points within geographical bounds """
+    ds = ds.where(  (ds[x]>=area[0]) & (ds[x]<=area[1]) 
+                  & (ds[y]>=area[2]) & (ds[y]<=area[3]), 
+                  drop=True,
+                 )
     # !! xarray.where broadcast all variables
     #ds = ds.where(  (ds.xp>=area[0]) & (ds.xp<=area[1]) 
     #              & (ds.yp>=area[2]) & (ds.yp>=area[3]), drop=True)
     return ds
-
-proj = myproj.MyProj("merc")
 
 def project(ds):
     """ fix spatial metrics terms """
@@ -153,3 +199,16 @@ def project(ds):
     #ds.suntans.xv, ds.suntans.yv = proj.to_ll(ds.suntans.xv, ds.suntans.yv)
     #ds.suntans.xp, ds.suntans.yp = proj.to_ll(ds.suntans.xp, ds.suntans.yp)
 
+def interpolate_hvelocities(ds, grd, zoom, dx=1e3):
+    """ interpolate velocity on a regular grid for plotting purposes"""
+    b = bounds[zoom]
+    lon, lat = np.arange(b[0], b[1], dx/111e3), np.arange(b[2], b[3], dx/111e3)
+    lon2, lat2 = np.meshgrid(lon, lat)
+    u = grd.suntans.interpolate(ds.uc.values, lon2, lat2, kind="linear")
+    v = grd.suntans.interpolate(ds.vc.values, lon2, lat2, kind="linear")
+    dsi = xr.Dataset(dict(u=(("lat", "lon"), u), v=(("lat", "lon"), v)),
+                     coords=dict(lon=(("lon",), lon), 
+                                 lat=(("lat",), lat),
+                                ),
+                    )
+    return dsi

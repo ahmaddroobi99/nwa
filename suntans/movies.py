@@ -8,6 +8,7 @@ import pandas as pd
 import xarray as xr
 from datetime import timedelta, datetime
 from matplotlib import pyplot as plt
+import matplotlib.dates as mdates
 
 import pynsitu as pin
 crs = pin.maps.crs
@@ -23,21 +24,56 @@ import threading
 
 # movie parameters
 v, cmap, clims = "vorticity", 'RdBu_r', (-2, 2)
-v, cmap, clims = "temp", pin.thermal, (27, 28)
-v, cmap, clims = "temp", "gnuplot2", (22, 33)   # large, year
+#v, cmap, clims = "eta", 'RdBu_r', (-.3, .3)
+#v, cmap, clims = "temp", pin.thermal, (27, 28)
+#v, cmap, clims = "temp", "gnuplot2", (22, 33)   # large, year
+#v, cmap, clims = "temp", "gnuplot2", (23, 32)   # large, year
+
+low = True
 
 zoom = "cp_large"
 zoom = "large"
+zoom = "central"
+zoom = "ridge"
 
-start, end = "2013/09/02T00:00", "2013/09/04T00:00"
-start, end = None, None # year long movie
+if low:
+    framerate=12 # delta_time=4  2 days/seconds
+else:
+    framerate=24
 
+#start, end, delta_time = "2013/09/02T00:00", "2013/09/04T00:00", 4 # dev
+#start, end, delta_time = "2013/09/02T00:00", "2013/09/04T00:00", 1
+#start, end, delta_time = None, None, 1 # year long movie
+start, end, delta_time = None, None, 4 # year long movie - low
+
+velocity = True
+
+tseries = None
+tseries = dict(
+    v="eta",
+    lon=120, lat=-16,
+)
+tseries_kwargs = dict(
+    tlim="10D",
+    axkwargs=dict(rect=[.6, .1, .2, .1]),
+    ylims=(-2,2), ylabel="[m]",
+    title="sea level",
+)
+
+# moorings to plot
+moorings = nwa.load_moorings()[["lonv", "latv"]]
+moorings = nwa.zoom(moorings, nwa.bounds[zoom], x="lonv", y="latv")
+
+# movie output name and figure directory
 name = "nwa_"+zoom+"_"+v
-
+if low:
+    name = name + "_low"
 fig_dir = "/home1/scratch/aponte/figs"
 
 # dask parameters
+distributed = True # dev
 #dask_jobs = 2
+#dask_jobs = 10
 dask_jobs = 10
 jobqueuekw = dict(processes=7, cores=7)
 
@@ -149,6 +185,43 @@ def dask_compute_batch(computations, client, batch_size=None):
 
 # ---------------------------------- core of the job to be done ---------------------------------- 
 
+
+def plot_time_series(da, 
+                     fig=None, axkwargs={},
+                     t=None, tlim=None,
+                     title=None,
+                     mkwargs={},
+                     ylims=None,
+                     ylabel="",
+                     **kwargs,
+                    ):
+    """ plot a timeseries in a separate axis"""
+    if fig is not None:
+        ax = fig.add_axes(**axkwargs)
+    else:
+        ax = plt.axes(**axkwargs)
+    #
+    dkwargs = dict(x="time", color="k")
+    dkwargs.update(**kwargs)
+    da.plot(ax=ax, **dkwargs)
+    #
+    if t is not None:
+        dat = da.sel(time=t)
+        t = dat.time.values
+        ax.axvline(t, color="orange")
+    if tlim is not None:
+        ax.set_xlim( t-pd.Timedelta(tlim), t+pd.Timedelta(tlim)  )
+    if ylims is not None:
+        ax.set_ylim(ylims)
+    if title is not None:
+        ax.set_title(title)
+    ax.grid()
+    #ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+    #ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax.set_xticklabels("")
+    ax.set_ylabel(ylabel)
+    return ax
+
 def clean_fig_dir():
     """ delete all figures """
     import os, shutil
@@ -163,7 +236,7 @@ def clean_fig_dir():
         except Exception as e:
             print('Failed to delete %s. Reason: %s' % (file_path, e))
 
-def generate_mpg(name, framerate=24):
+def generate_mpg(name):
     """ generate mpg files
     Requires ffmpeg in environment, do with image2Movies otherwise
     https://stackoverflow.com/questions/24961127/how-to-create-a-video-from-images-with-ffmpeg
@@ -178,7 +251,7 @@ if __name__ == "__main__":
     # logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
     # to file
     logging.basicConfig(
-        filename="distributed.log",
+        filename="job.log",
         level=logging.INFO,
         #level=logging.DEBUG,
     )
@@ -202,59 +275,94 @@ if __name__ == "__main__":
     
     # spin up cluster
     logging.info("1 - spin up dask cluster")
-    # distributed
-    cluster, client = spin_up_cluster(dask_jobs)
-    # local
-    #cluster = LocalCluster()
-    #client = Client(cluster)
+    if distributed:
+        # distributed
+        logging.info(" this is a distributed cluster")
+        cluster, client = spin_up_cluster(dask_jobs)
+    else:
+        # local
+        logging.info(" this is a local cluster")
+        cluster = LocalCluster()
+        client = Client(cluster)
 
     # create tiling
     logging.info("2 - load data")
+    
     ds, grd = nwa.load_surf()
+    zarr_grad = os.path.join(nwa.suntans_dir, f"suntans_2km_surf_gradients")
     
-    if start is None and end is not None:    
-        ds = ds.sel(time=slice(start, end))
+    if tseries is not None:
+        idx = nwa.find_point_index(tseries["lon"], tseries["lat"], grd)
+        tseries_data = ds[tseries["v"]].isel(Nc=idx).chunk(dict(time=-1)).persist()
+    else:
+        tseries_data = None
+        
+    if low:
+        zarr = os.path.join(nwa.suntans_dir, f"suntans_2km_surf_low")
+        ds = xr.open_zarr(zarr)
+        zarr_grad = os.path.join(nwa.suntans_dir, f"suntans_2km_surf_low_gradients")        
     
+    if start is not None and end is not None:    
+        ds = ds.sel(time=slice(start, end))          
+    ds = ds.isel(time=slice(0, None, delta_time))
+
     # add deformations
     if v in ["vorticity", "divergence"]:
-        zarr = os.path.join(nwa.suntans_dir, f"suntans_2km_surf_gradients")
-        dsd = xr.open_zarr(zarr)
-        if start is None and end is not None:
+        dsd = xr.open_zarr(zarr_grad)
+        if start is not None and end is not None:
             dsd = dsd.sel(time=slice(start, end))
+        dsd = dsd.isel(time=slice(0, None, delta_time))
         f = pin.geo.coriolis(dsd.yv)
-        ds["vorticity"] = (dsd["dvcdx"] - dsd["ducdy"])/f
-        #ds["divergence"] = dsd["ducdx"] + dsd["dvcdy"]/f
+        dsd["vorticity"] = (dsd["dvcdx"] - dsd["ducdy"])/f
+        dsd["divergence"] = dsd["ducdx"] + dsd["dvcdy"]/f
         #ds["strain_normal"] = dsd["ducdx"] - dsd["dvcdy"]
         #ds["strain_shear"] = dsd["dvcdx"] + dsd["ducdy"]
         ds[v] = dsd[v]
     #
-    ds = ds[[v]].persist() # only keep variable of interest at the moment
+    V = [v]
+    if velocity:
+        V+=["uc", "vc"]
+    ds = ds[V].persist() # only keep variable of interest at the moment
     wait(ds)
     
     #
     logging.info("3 - start main loop")
     
-    def print_figure(da, i):
+    def print_figure(ds, i, tseries_data):
 
+        da = ds[v]
+        if velocity:
+            dsuv = nwa.interpolate_hvelocities(ds, grd, zoom, dx=1e3)
+                
         MPL_LOCK = threading.Lock()
         with MPL_LOCK:
-
+            
             plt.switch_backend('agg')
 
             fig, ax = nwa.map_init(zoom, bathy=(grd, da))
+            nwa.plot_moorings(ax, moorings=moorings)
             _, _, poly, cbar = grd.suntans.plotcelldata(da, 
                                                         vmin=clims[0], vmax=clims[1], 
                                                         cmap=cmap, 
                                                         crs=crs,
                                                        )
+            if velocity:
+                nwa.plot_velocity(ax, dsuv_low, di=4, uref=.2, xref=.7, yref=.88)
 
             t = str(da.time.dt.strftime('%Y/%m/%d %Hh').values)
             ax.set_title(t)
 
+            if tseries_data is not None:
+                plot_time_series(tseries_data,
+                                 t=da.time,
+                                 fig=fig,
+                                 **tseries_kwargs,
+                                )
+            
             fig_file = os.path.join(fig_dir, f"{i:05d}.png")
             fig.savefig(fig_file, dpi=150)
             plt.close(fig)
-        
+    
     print_figure_delayed = delayed(print_figure)        
     
     n_t = ds.time.size
@@ -262,7 +370,7 @@ if __name__ == "__main__":
     #with logging_redirect_tqdm():    
     #for i in tqdm(range(0, n_t, n_workers)):
     for i in range(0, n_t, n_workers):
-        values = [print_figure_delayed(ds[v].isel(time=j), j) 
+        values = [print_figure_delayed(ds.isel(time=j), j, tseries_data) 
                   for j in range(i, min(i+n_workers, n_t))]    
         futures = client.compute(values)
         results = client.gather(futures)
