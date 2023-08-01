@@ -1,0 +1,320 @@
+import numpy as np
+import pandas as pd
+import xarray as xr
+import dask.array as da
+
+import xrft
+
+import matplotlib.pyplot as plt
+
+from gptide import cov
+
+day = 86400
+
+def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
+    
+    print(f"Covariance model = {model}")
+    
+    # rescale grid parameters for some models
+    if model in ["matern2_iso"]:
+        factor = 10
+        Nx //= factor
+        Ny //= factor
+        dx *= factor  # km
+        dy *= factor  # km
+
+    N = (Nx, Ny, Nt)
+    t_x = np.arange(Nx)[:, None]*dx
+    t_y = np.arange(Ny)[:, None]*dy
+    t_t = np.arange(Nt)[:, None]*dt
+
+    # time
+    Cov_t = cov.matern32(t_t, t_t.T, λt) # -2 high frequency slope
+
+    # space
+    Cov_x, Cov_y, Cov_d = (None,)*3
+    isotropy=False
+    if model == "matern12_xy":
+        Cov_x = cov.matern12(t_x, t_x.T, λx) # -4 spectral slope
+        Cov_y = cov.matern12(t_y, t_y.T, λy) # -4 spectral slope
+    elif model == "matern2_xy":
+        Cov_x = cov.matern_general(np.abs(t_x - t_x.T), 1., 2, λx) # -5 spectral slope
+        Cov_y = cov.matern_general(np.abs(t_y - t_y.T), 1., 2, λy) # -5 spectral slope
+    elif model == "matern52_xy":
+        Cov_x = cov.matern52(t_x, t_x.T, λx) # -6 spectral slope
+        Cov_y = cov.matern52(t_y, t_y.T, λy) # -6 spectral slope
+    elif model == "expquad_xy":
+        jitter = 1e-10
+        Cov_x = cov.expquad(t_x, t_x.T, λx) + 1e-10 * np.eye(Nx)
+        Cov_y = cov.expquad(t_y, t_y.T, λy) + 1e-10 * np.eye(Nx)
+        # relative amplitude of the jitter:
+        #    - on first derivative: np.sqrt(jitter) * λx/dx
+        #    - on second derivative: np.sqrt(jitter) * (λx/dx)**2
+        # with jitter = -10, λx/dx=100, these signatures are respectively: 1e-3 and 1e-1
+
+    C = (Cov_x, Cov_y, Cov_t)
+
+    if model == "matern2_iso":
+        # for covariances based on distances
+        t_x2 = (t_x   + t_y.T*0).ravel()[:, None]
+        t_y2 = (t_x*0 + t_y.T  ).ravel()[:, None]
+        t_d = np.sqrt( (t_x2 - t_x2.T)**2 + (t_y2 - t_y2.T)**2 )
+        #print(t_d.shape)
+        Cov_d = cov.matern_general(t_d, 1., 2, λx) # -5 spectral slope
+        C = (Cov_d, Cov_t)
+        isotropy=True
+
+    # Input data points
+    xd = np.arange(0,dx*Nx,dx)[:,None]-dx/2
+    yd = np.arange(0,dy*Ny,dy)[:,None]-dy/2
+    td = np.arange(0,dt*Nt,dt)[:,None]-dt/2
+    X = xd, yd, td
+    
+    return C, X, N, isotropy
+
+
+def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotropy=False):
+    """ Generate velocity fields
+    
+    Parameters
+    ----------
+    kind: str
+        "uv": generates u and v independantly
+        "pp": generates psi (streamfunction) and (phi) independantly from which velocities are derived
+    N: tuple
+        Grid dimension, e.g.: (Nx, Ny, Nt)
+    C: tuple
+        Covariance arrays, e.g.: (Cov_x, Cov_y, Cov_t)
+    xyt: tuple
+        xd, yd, td coordinates
+    amplitude: tuple
+        amplitudes (u/v or psi, phi) as a size two tuple
+    scale: float
+        rescaling parameter
+    """
+    
+    # prepare output dataset
+    xd, yd, td = xyt
+    ds = xr.Dataset(
+        coords=dict(x=("x", xd[:,0]), y=("y", yd[:,0]), time=("time", td[:,0])),
+    )
+    ds["time"].attrs["units"] = "days"
+    ds["x"].attrs["units"] = "km"
+    ds["y"].attrs["units"] = "km"
+    if not time:
+        ds = ds.drop("time")
+        
+    # perform Cholesky decompositions
+    if isotropy:
+        Cov_x, Cov_t = C
+    else:
+        Cov_x, Cov_y, Cov_t = C
+    Lx = np.linalg.cholesky(Cov_x)
+    Lt = np.linalg.cholesky(Cov_t)
+    if not isotropy:
+        Ly = np.linalg.cholesky(Cov_y)
+    # start converting to dask arrays
+    t_chunk = 5
+    #Lt_dask = da.from_array(Lt).persist()
+    if dask:
+        Lx = da.from_array(Lx, chunks=(-1, -1))
+        Lt = da.from_array(Lt, chunks=(t_chunk, -1)).persist()
+
+    # generate sample
+    if time and not isotropy:
+        if dask:
+            U0 = da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            U1 = da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            # noise
+            u0_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            u1_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+    elif not time and not isotropy:
+        U0 = np.random.normal(0, 1, size=(N[0], N[1]))
+        U1 = np.random.normal(0, 1, size=(N[0], N[1]))
+        # noise
+        u0_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
+        u1_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
+    elif time and isotropy:
+        if dask:
+            _N = (N[0]*N[1], N[2])
+            U0 = da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            U1 = da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            # noise
+            u0_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            u1_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+    elif not time and isotropy:
+        U0 = np.random.normal(0, 1, size=(N[0]*N[1],))
+        U1 = np.random.normal(0, 1, size=(N[0]*N[1],))
+        # noise
+        u0_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
+        u1_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
+    
+    
+    #return Lx, Lt, U0, u0_noise
+    # 2D
+    #zg = η * Lx @ V @ Lt.T
+    # 3D
+    # with dask
+    #zg = η * da.einsum("ij,kl,mn,jln->ikm", Lx, Ly, Lt_dask, V)
+    # with opt_einsum
+    import opt_einsum as oe
+    if time and not isotropy:
+        u0 = amplitudes[0] * oe.contract("ij,kl,mn,jln", Lx, Ly, Lt, U0)
+        u1 = amplitudes[1] * oe.contract("ij,kl,mn,jln", Lx, Ly, Lt, U1)
+    elif not time and not isotropy:
+        u0 = amplitudes[0] * oe.contract("ij,kl,jl", Lx, Ly, U0)
+        u1 = amplitudes[1] * oe.contract("ij,kl,jl", Lx, Ly, U1)
+    elif time and isotropy:
+        u0 = amplitudes[0] * oe.contract("ij,kl,jl", Lx, Lt, U0)
+        u1 = amplitudes[1] * oe.contract("ij,kl,jl", Lx, Lt, U1)            
+    elif not time and isotropy:
+        u0 = amplitudes[0] * Lx @ U0
+        u1 = amplitudes[1] * Lx @ U1
+            
+    # add noise
+    u0 = u0 + u0_noise
+    u1 = u1 + u1_noise
+    
+    _u0 = u0
+    
+    if isotropy and time:
+        # final reshaping required
+        u0 = u0.reshape(N)
+        u1 = u1.reshape(N)
+    elif isotropy and not time:
+        # final reshaping required
+        u0 = u0.reshape(N[0], N[1])
+        u1 = u1.reshape(N[0], N[1])
+        
+    #return _u0, u0
+    
+    if time:
+        dims = ("x", "y", "time")
+    else:
+        dims = ("x", "y",)
+    if kind=="uv":
+        ds["U"] = (dims, u0)
+        ds["V"] = (dims, u1)
+    elif kind=="pp":
+        ds["psi"] = (dims, u0)
+        ds["phi"] = (dims, u1)
+        # rederive u
+        dpsidx = ds.psi.differentiate("x")
+        dpsidy = ds.psi.differentiate("y")
+        dphidx = ds.phi.differentiate("x")
+        dphidy = ds.phi.differentiate("y")
+        ds["U"] = -dpsidy + dphidx
+        ds["V"] =  dpsidx + dphidy
+
+    ds = ds.transpose(*reversed(dims))
+    ds.attrs.update(kind=kind)
+
+    return ds
+
+
+def plot_snapshot(ds, i=None, **kwargs):
+
+    if i is not None:
+        ds = ds.isel(time=i)
+    
+    if "psi" in ds:
+        return plot_snapshot_pp(ds, **kwargs)
+    
+
+def plot_snapshot_pp(ds, darrow=20):
+    
+    fig, axes = plt.subplots(3,2,figsize=(15,15), sharex=True)
+    
+    dsa = ds.isel(x=slice(0,None,darrow), y=slice(0,None,darrow))
+
+    ax = axes[0, 0]
+    ds.psi.plot(ax=ax, cmap="RdBu_r")
+    dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ax.set_aspect("equal")
+    ax.set_title("psi")
+
+    ax = axes[0, 1]
+    ds.phi.plot(ax=ax, cmap="RdBu_r")
+    dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ax.set_aspect("equal")
+    ax.set_title("phi")
+    
+    ##
+    ax = axes[1, 0]
+    ds.U.plot(ax=ax, cmap="RdBu_r")
+    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ax.set_aspect("equal")
+    ax.set_title("u")
+
+    ax = axes[1, 1]
+    ds.V.plot(ax=ax, cmap="RdBu_r")
+    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ax.set_aspect("equal")
+    ax.set_title("v")
+    
+    ##
+    divergence = ds.U.differentiate("x")/1e3 + ds.V.differentiate("y")/1e3
+    vorticity = ds.V.differentiate("x")/1e3 - ds.U.differentiate("y")/1e3
+    
+    ax = axes[2, 0]
+    divergence.plot(ax=ax, cmap="RdBu_r")
+    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ax.set_aspect("equal")
+    ax.set_title("divergence")
+
+    ax = axes[2, 1]
+    vorticity.plot(ax=ax, cmap="RdBu_r")
+    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ax.set_aspect("equal")
+    ax.set_title("vorticity")    
+    
+    return fig, axes
+
+
+
+def plot_spectra(ds, v, yref=1e-1, **kwargs):
+    
+    # compute spectra
+    dkwargs = dict(dim=['x','y'], detrend='linear', window=True)
+    E = xrft.power_spectrum(ds[v], **kwargs)
+    E = E.compute()    
+    E_iso = xrft.isotropic_power_spectrum(ds[v], truncate=True, **dkwargs)
+    if "time" in E.dims:
+        E = E.mean("time")
+        E_iso = E_iso.mean("time")
+    E = E.compute()    
+    E_iso = E_iso.compute()    
+    
+    # plot in kx-ky space
+    _E = E.where( (E.freq_x>0) & (E.freq_y>0), drop=True )
+    fig, ax = plt.subplots(1,1)
+    np.log10(_E).plot(**kwargs)
+    np.log10(_E).plot.contour(levels=[-8, -4, 0], colors="w", linestyles="-")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_title(f"{v}: kx-ky power spectrum")
+    
+    # plot isotropic
+    fy = 1e-3
+    _Ex = E.sel(freq_y=fy, method="nearest")
+    _Ex = _Ex.where(_Ex.freq_x>0, drop=True)
+
+    fig, ax = plt.subplots(1,1)
+    E_iso.plot(label="iso")
+    _Ex.plot(label=f"E(f_y={fy:.1e})")
+    #np.log10(_E).plot.contour(levels=[-8, -4, 0], colors="w", linestyles="-")
+
+    _f = np.logspace(-2.5,-.5, 10)
+    ax.plot(_f, yref * (_f/_f[0])**-2, color="k")
+    ax.text(_f[-1], yref * (_f[-1]/_f[0])**-2, r"$f^{-2}$")
+    ax.plot(_f, yref * (_f/_f[0])**-4, color="k")
+    ax.text(_f[-1], yref * (_f[-1]/_f[0])**-4, r"$f^{-3}$")
+    ax.plot(_f, yref * (_f/_f[0])**-6, color="k")
+    ax.text(_f[-1], yref * (_f[-1]/_f[0])**-6, r"$f^{-6}$")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.legend()
+    ax.set_title(f"{v}: isotropic spectrum")
+    
