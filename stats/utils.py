@@ -13,10 +13,11 @@ day = 86400
 
 def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     
-    print(f"Covariance model = {model}")
+    
+    print(f"Covariance models: space={model[0]} , time={model[1]}")
     
     # rescale grid parameters for some models
-    if model in ["matern2_iso"]:
+    if model[0] in ["matern2_iso"]:
         factor = 10
         Nx //= factor
         Ny //= factor
@@ -29,21 +30,27 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     t_t = np.arange(Nt)[:, None]*dt
 
     # time
-    Cov_t = cov.matern32(t_t, t_t.T, λt) # -2 high frequency slope
+    if model[1]=="matern12":
+        Cov_t = cov.matern12(t_t, t_t.T, λt) # -2 high frequency slope
+    elif model[1]=="matern32":
+        Cov_t = cov.matern32(t_t, t_t.T, λt) # -4 high frequency slope
 
     # space
     Cov_x, Cov_y, Cov_d = (None,)*3
     isotropy=False
-    if model == "matern12_xy":
-        Cov_x = cov.matern12(t_x, t_x.T, λx) # -4 spectral slope
-        Cov_y = cov.matern12(t_y, t_y.T, λy) # -4 spectral slope
-    elif model == "matern2_xy":
+    if model[0] == "matern12_xy":
+        Cov_x = cov.matern12(t_x, t_x.T, λx) # -2 spectral slope
+        Cov_y = cov.matern12(t_y, t_y.T, λy) # -2 spectral slope
+    elif model[0] == "matern32_xy":
+        Cov_x = cov.matern32(t_x, t_x.T, λx) # -4 spectral slope
+        Cov_y = cov.matern32(t_y, _xyt_y.T, λy) # -4 spectral slope
+    elif model[0] == "matern2_xy":
         Cov_x = cov.matern_general(np.abs(t_x - t_x.T), 1., 2, λx) # -5 spectral slope
         Cov_y = cov.matern_general(np.abs(t_y - t_y.T), 1., 2, λy) # -5 spectral slope
-    elif model == "matern52_xy":
+    elif model[0] == "matern52_xy":
         Cov_x = cov.matern52(t_x, t_x.T, λx) # -6 spectral slope
         Cov_y = cov.matern52(t_y, t_y.T, λy) # -6 spectral slope
-    elif model == "expquad_xy":
+    elif model[0] == "expquad":
         jitter = 1e-10
         Cov_x = cov.expquad(t_x, t_x.T, λx) + 1e-10 * np.eye(Nx)
         Cov_y = cov.expquad(t_y, t_y.T, λy) + 1e-10 * np.eye(Nx)
@@ -54,7 +61,7 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
 
     C = (Cov_x, Cov_y, Cov_t)
 
-    if model == "matern2_iso":
+    if model[0] == "matern2_iso":
         # for covariances based on distances
         t_x2 = (t_x   + t_y.T*0).ravel()[:, None]
         t_y2 = (t_x*0 + t_y.T  ).ravel()[:, None]
@@ -272,7 +279,7 @@ def plot_snapshot_pp(ds, darrow=20):
 
 
 
-def plot_spectra(ds, v, yref=1e-1, **kwargs):
+def plot_spectra(ds, v, yref=1e-1, slopes=[-4,-5,-6], **kwargs):
     
     # compute spectra
     dkwargs = dict(dim=['x','y'], detrend='linear', window=True)
@@ -305,13 +312,14 @@ def plot_spectra(ds, v, yref=1e-1, **kwargs):
     _Ex.plot(label=f"E(f_y={fy:.1e})")
     #np.log10(_E).plot.contour(levels=[-8, -4, 0], colors="w", linestyles="-")
 
-    _f = np.logspace(-2.5,-.5, 10)
-    ax.plot(_f, yref * (_f/_f[0])**-2, color="k")
-    ax.text(_f[-1], yref * (_f[-1]/_f[0])**-2, r"$f^{-2}$")
-    ax.plot(_f, yref * (_f/_f[0])**-4, color="k")
-    ax.text(_f[-1], yref * (_f[-1]/_f[0])**-4, r"$f^{-3}$")
-    ax.plot(_f, yref * (_f/_f[0])**-6, color="k")
-    ax.text(_f[-1], yref * (_f[-1]/_f[0])**-6, r"$f^{-6}$")
+    _f = np.logspace(-2.5, min(-.5, float(np.log10(_Ex.freq_x.max()))), 10)
+    for s in slopes:
+        ax.plot(_f, yref * (_f/_f[0])**s, color="k")
+        ax.text(_f[-1], yref * (_f[-1]/_f[0])**s, r"$f^{{f}}$".format(int(s)))
+    #ax.plot(_f, yref * (_f/_f[0])**-4, color="k")
+    #ax.text(_f[-1], yref * (_f[-1]/_f[0])**-4, r"$f^{-3}$")
+    #ax.plot(_f, yref * (_f/_f[0])**-6, color="k")
+    #ax.text(_f[-1], yref * (_f[-1]/_f[0])**-6, r"$f^{-6}$")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
