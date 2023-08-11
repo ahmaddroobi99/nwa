@@ -72,9 +72,9 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
         isotropy=True
 
     # Input data points
-    xd = np.arange(0,dx*Nx,dx)[:,None]-dx/2
-    yd = np.arange(0,dy*Ny,dy)[:,None]-dy/2
-    td = np.arange(0,dt*Nt,dt)[:,None]-dt/2
+    xd = (np.arange(0,Nx)[:,None]-1/2)*dx
+    yd = (np.arange(0,Ny)[:,None]-1/2)*dy
+    td = (np.arange(0,Nt)[:,None]-1/2)*dt
     X = xd, yd, td
     
     return C, X, N, isotropy
@@ -128,33 +128,38 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
         Lt = da.from_array(Lt, chunks=(t_chunk, -1)).persist()
 
     # generate sample
+    u0_noise, u1_noise = 0., 0.
     if time and not isotropy:
         if dask:
             U0 = da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
             U1 = da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
             # noise
-            u0_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-            u1_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            if noise>0:
+                u0_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+                u1_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
     elif not time and not isotropy:
         U0 = np.random.normal(0, 1, size=(N[0], N[1]))
         U1 = np.random.normal(0, 1, size=(N[0], N[1]))
         # noise
-        u0_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
-        u1_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
+        if noise>0:
+            u0_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
+            u1_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
     elif time and isotropy:
         if dask:
             _N = (N[0]*N[1], N[2])
             U0 = da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
             U1 = da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
             # noise
-            u0_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-            u1_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            if noise>0:
+                u0_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+                u1_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
     elif not time and isotropy:
         U0 = np.random.normal(0, 1, size=(N[0]*N[1],))
         U1 = np.random.normal(0, 1, size=(N[0]*N[1],))
         # noise
-        u0_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
-        u1_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
+        if noise>0:
+            u0_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
+            u1_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
     
     
     #return Lx, Lt, U0, u0_noise
@@ -315,7 +320,7 @@ def plot_spectra(ds, v, yref=1e-1, slopes=[-4,-5,-6], **kwargs):
     _f = np.logspace(-2.5, min(-.5, float(np.log10(_Ex.freq_x.max()))), 10)
     for s in slopes:
         ax.plot(_f, yref * (_f/_f[0])**s, color="k")
-        ax.text(_f[-1], yref * (_f[-1]/_f[0])**s, r"$f^{{f}}$".format(int(s)))
+        ax.text(_f[-1], yref * (_f[-1]/_f[0])**s, r"$f^{{s}}$".format(int(s)))
     #ax.plot(_f, yref * (_f/_f[0])**-4, color="k")
     #ax.text(_f[-1], yref * (_f[-1]/_f[0])**-4, r"$f^{-3}$")
     #ax.plot(_f, yref * (_f/_f[0])**-6, color="k")

@@ -165,6 +165,18 @@ def load_grd():
     grd = xr.open_dataset(nc)
     return grd
 
+def get_Ac():
+    grd = load_grd()
+    grd["cells"] = grd.cells.where( grd.cells!=999999, other=-999999 )
+    grd.suntans.Nk = np.ones(grd.Nc.size)
+    #
+    project(grd)
+    Ac = (xr.DataArray(grd.suntans.Ac, dims=("Nc"), name="Ac")
+          .assign_coords(xv=grd.xv, yv=grd.yv)
+          .chunk(dict(Nc=2000))
+    )
+    return Ac
+
 def load_moorings():
     nc = os.path.join(suntans_dir, "NWS_2km_GLORYS_hex_2013_2014_Nk80dt60_Profile.nc")
     mo = xr.open_dataset(nc)
@@ -189,9 +201,17 @@ def zoom(ds, area, x="xv", y="yv"):
     #              & (ds.yp>=area[2]) & (ds.yp>=area[3]), drop=True)
     return ds
 
+def spatial_average(da, Ac, area=None):
+    """ spatial average weighted by cell area
+    """
+    if area is not None:
+        da = zoom(da, area)
+        Ac = zoom(Ac, area)
+    return (da*Ac).sum("Nc")/Ac.sum()
+
 def project(ds):
     """ fix spatial metrics terms """
-    print(ds.suntans.xv)
+    #print(ds.suntans.xv)
     ds.suntans.xv, ds.suntans.yv = proj.to_xy(ds.suntans.xv, ds.suntans.yv)
     ds.suntans.xp, ds.suntans.yp = proj.to_xy(ds.suntans.xp, ds.suntans.yp)
     ds.suntans.calc_all_properties()

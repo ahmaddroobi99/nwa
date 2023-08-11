@@ -32,9 +32,9 @@ v, cmap, clims = "vorticity", 'RdBu_r', (-2, 2)
 low = True
 
 zoom = "cp_large"
-zoom = "large"
-zoom = "central"
-zoom = "ridge"
+#zoom = "large"
+#zoom = "central"
+#zoom = "ridge"
 
 if low:
     framerate=12 # delta_time=4  2 days/seconds
@@ -47,6 +47,9 @@ else:
 start, end, delta_time = None, None, 4 # year long movie - low
 
 velocity = True
+vkwargs = dict(ridge=dict(dx=1e3, di=4),
+               cp_large=dict(dx=2e3, di=4),
+              )
 
 tseries = None
 tseries = dict(
@@ -302,9 +305,12 @@ if __name__ == "__main__":
         ds = xr.open_zarr(zarr)
         zarr_grad = os.path.join(nwa.suntans_dir, f"suntans_2km_surf_low_gradients")        
     
-    if start is not None and end is not None:    
-        ds = ds.sel(time=slice(start, end))          
+    if start is not None and end is not None:
+        ds = ds.sel(time=slice(start, end))
     ds = ds.isel(time=slice(0, None, delta_time))
+    if low:
+        # trim edges of time line for low-passed data
+        ds = ds.sel(time=slice("2013/07/09 04:00", "2014/06/22 21:00"))
 
     # add deformations
     if v in ["vorticity", "divergence"]:
@@ -332,7 +338,7 @@ if __name__ == "__main__":
 
         da = ds[v]
         if velocity:
-            dsuv = nwa.interpolate_hvelocities(ds, grd, zoom, dx=1e3)
+            dsuv = nwa.interpolate_hvelocities(ds, grd, zoom, dx=vkwargs[zoom]["dx"])
                 
         MPL_LOCK = threading.Lock()
         with MPL_LOCK:
@@ -347,7 +353,7 @@ if __name__ == "__main__":
                                                         crs=crs,
                                                        )
             if velocity:
-                nwa.plot_velocity(ax, dsuv_low, di=4, uref=.2, xref=.7, yref=.88)
+                nwa.plot_velocity(ax, dsuv, di=vkwargs[zoom]["di"], uref=.2, xref=.7, yref=.88)
 
             t = str(da.time.dt.strftime('%Y/%m/%d %Hh').values)
             ax.set_title(t)
