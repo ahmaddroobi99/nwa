@@ -16,14 +16,6 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     
     print(f"Covariance models: space={model[0]} , time={model[1]}")
     
-    # rescale grid parameters for some models
-    if model[0] in ["matern2_iso"]:
-        factor = 10
-        Nx //= factor
-        Ny //= factor
-        dx *= factor  # km
-        dy *= factor  # km
-
     N = (Nx, Ny, Nt)
     t_x = np.arange(Nx)[:, None]*dx
     t_y = np.arange(Ny)[:, None]*dy
@@ -61,16 +53,21 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
 
     C = (Cov_x, Cov_y, Cov_t)
 
-    if model[0] == "matern2_iso":
-        # for covariances based on distances
+    # for covariances based on horizontal distances
+    isotropy = ("iso" in model[0])
+    if isotropy:
         t_x2 = (t_x   + t_y.T*0).ravel()[:, None]
         t_y2 = (t_x*0 + t_y.T  ).ravel()[:, None]
-        t_d = np.sqrt( (t_x2 - t_x2.T)**2 + (t_y2 - t_y2.T)**2 )
-        #print(t_d.shape)
-        Cov_d = cov.matern_general(t_d, 1., 2, λx) # -5 spectral slope
-        C = (Cov_d, Cov_t)
-        isotropy=True
-
+        t_xy = np.sqrt( (t_x2 - t_x2.T)**2 + (t_y2 - t_y2.T)**2 )        
+        if model[0] == "matern2_iso":
+            Cov_d = cov.matern_general(t_xy, 1., 2, λx) # -5 spectral slope
+            C = (Cov_d, Cov_t)
+        elif model[0] == "matern32_iso":
+            Cov_d = cov.matern32(t_xy, 0., λx) # -4 spectral slope
+            C = (Cov_d, Cov_t)
+        else:
+            assert False, model[0]+" is not implemented"
+        
     # Input data points
     xd = (np.arange(0,Nx)[:,None]-1/2)*dx
     yd = (np.arange(0,Ny)[:,None]-1/2)*dy
@@ -80,7 +77,7 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     return C, X, N, isotropy
 
 
-def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotropy=False):
+def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotropy=False, seed=1234):
     """ Generate velocity fields
     
     Parameters
@@ -94,10 +91,16 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
         Covariance arrays, e.g.: (Cov_x, Cov_y, Cov_t)
     xyt: tuple
         xd, yd, td coordinates
-    amplitude: tuple
+    amplitudes: tuple
         amplitudes (u/v or psi, phi) as a size two tuple
-    scale: float
-        rescaling parameter
+    dask: boolean, optional
+        activate dask distribution
+    time: boolean, optional
+        activate generation of time series
+    isotropy: boolean, optional
+        horizontally isotropic formulation
+    seed: int, optional
+        random number generation seed
     """
     
     # prepare output dataset
@@ -129,14 +132,16 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
 
     # generate sample
     u0_noise, u1_noise = 0., 0.
+    rstate = da.random.RandomState(seed)
+    np.random.seed(seed)
     if time and not isotropy:
         if dask:
-            U0 = da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-            U1 = da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            U0 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            U1 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
             # noise
             if noise>0:
-                u0_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-                u1_noise = noise * da.random.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+                u0_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+                u1_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
     elif not time and not isotropy:
         U0 = np.random.normal(0, 1, size=(N[0], N[1]))
         U1 = np.random.normal(0, 1, size=(N[0], N[1]))
@@ -147,12 +152,12 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
     elif time and isotropy:
         if dask:
             _N = (N[0]*N[1], N[2])
-            U0 = da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-            U1 = da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            U0 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            U1 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
             # noise
             if noise>0:
-                u0_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-                u1_noise = noise * da.random.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+                u0_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+                u1_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
     elif not time and isotropy:
         U0 = np.random.normal(0, 1, size=(N[0]*N[1],))
         U1 = np.random.normal(0, 1, size=(N[0]*N[1],))
@@ -289,8 +294,9 @@ def plot_spectra(ds, v, yref=1e-1, slopes=[-4,-5,-6], **kwargs):
     # compute spectra
     dkwargs = dict(dim=['x','y'], detrend='linear', window=True)
     E = xrft.power_spectrum(ds[v], **kwargs)
-    E = E.compute()    
+    E = E.compute()
     E_iso = xrft.isotropic_power_spectrum(ds[v], truncate=True, **dkwargs)
+    print(E_iso)
     if "time" in E.dims:
         E = E.mean("time")
         E_iso = E_iso.mean("time")
@@ -308,19 +314,19 @@ def plot_spectra(ds, v, yref=1e-1, slopes=[-4,-5,-6], **kwargs):
     ax.set_title(f"{v}: kx-ky power spectrum")
     
     # plot isotropic
-    fy = 1e-3
-    _Ex = E.sel(freq_y=fy, method="nearest")
-    _Ex = _Ex.where(_Ex.freq_x>0, drop=True)
+    #fy = 1e-3
+    #_Ex = E.sel(freq_y=fy, method="nearest")
+    #_Ex = _Ex.where(_Ex.freq_x>0, drop=True)
 
     fig, ax = plt.subplots(1,1)
-    E_iso.plot(label="iso")
-    _Ex.plot(label=f"E(f_y={fy:.1e})")
+    E_iso.plot(label="iso", lw=4, zorder=10)
+    #_Ex.plot(label=f"E(f_y={fy:.1e})")
     #np.log10(_E).plot.contour(levels=[-8, -4, 0], colors="w", linestyles="-")
 
-    _f = np.logspace(-2.5, min(-.5, float(np.log10(_Ex.freq_x.max()))), 10)
+    _f = np.logspace(-2.5, min(-.5, float(np.log10(E_iso.freq_r.max()))), 10)
     for s in slopes:
         ax.plot(_f, yref * (_f/_f[0])**s, color="k")
-        ax.text(_f[-1], yref * (_f[-1]/_f[0])**s, r"$f^{{s}}$".format(int(s)))
+        ax.text(_f[-1], yref * (_f[-1]/_f[0])**s, r"$f^{}$".format(int(s)))
     #ax.plot(_f, yref * (_f/_f[0])**-4, color="k")
     #ax.text(_f[-1], yref * (_f[-1]/_f[0])**-4, r"$f^{-3}$")
     #ax.plot(_f, yref * (_f/_f[0])**-6, color="k")
