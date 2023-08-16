@@ -19,7 +19,10 @@ crs = pin.maps.crs
 
 # ------------------------------ general ----------------------------------------------------
 
-suntans_dir = "/home/datawork-lops-osi/aponte/nwa/"
+suntans_dir = "/home/datawork-lops-osi/aponte/nwa/suntans/"
+
+# time to consider for temporally averaged statistics
+time_good = slice("2013/12/01", None)
 
 # mooring locations
 moorings = dict(
@@ -151,8 +154,11 @@ def plot_velocity(ax, dsuv,
 
 # ------------------------------ suntans -------------------------------------------------
 
-def load_surf():
-    zarr = os.path.join(suntans_dir, "suntans_2km_surf")
+def load_surf(full=True):
+    if full:
+        zarr = os.path.join(suntans_dir, "suntans_2km_surf_full")
+    else:
+        zarr = os.path.join(suntans_dir, "suntans_2km_surf")
     ds = xr.open_zarr(zarr)
     #grd = ds[[v for v in ds if "time" not in ds[v].dims]].compute()
     grd = load_grd()
