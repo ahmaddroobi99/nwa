@@ -29,7 +29,8 @@ dask-scheduler --scheduler-file scheduler-$HOSTNAME.json --idle-timeout 0
 ```
 2. launch workers
 ```
-ssh localhost "cd /software/projects/pawsey0106/aponte/ && sbatch --ntasks=32 -c 8 --time=10:00:00 start_worker.slm scheduler-$HOSTNAME.json ./"
+ssh localhost "cd /software/projects/pawsey0106/aponte/ && sbatch --ntasks=128 -c 2 --time=04:00:00 start_worker.slm scheduler-$HOSTNAME.json ./"
+#ssh localhost "cd /software/projects/pawsey0106/aponte/ && sbatch --ntasks=32 -c 8 --time=10:00:00 start_worker.slm scheduler-$HOSTNAME.json ./"
 # configuration set in startup_jupyter.slm
 ```
 
