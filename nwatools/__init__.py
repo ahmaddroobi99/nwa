@@ -87,7 +87,8 @@ def map_init(zoom, bathy=None, tracks=True, bathy_kw=None, **kwargs):
     if bathy is not None:
         grd, ds = bathy
         bkwargs = dict(clevs=bathy_lvls, filled=False, 
-            colors="k", linewidths=0.5,
+            linewidths=0.5,
+            colors="k",
             colorbar=False, transform=crs,
             zorder=10,
         )
@@ -154,12 +155,11 @@ def plot_velocity(ax, dsuv,
 
 # ------------------------------ suntans -------------------------------------------------
 
-def load_surf(full=True):
-    if full:
-        zarr = os.path.join(suntans_dir, "suntans_2km_surf_full")
-    else:
-        zarr = os.path.join(suntans_dir, "suntans_2km_surf")
+def load_surf(top_level=False):
+    zarr = os.path.join(suntans_dir, "suntans_2km_surf")
     ds = xr.open_zarr(zarr)
+    if top_level:
+        ds = ds.isel(Nk=0)
     #grd = ds[[v for v in ds if "time" not in ds[v].dims]].compute()
     grd = load_grd()
     # switch some variables to coords:

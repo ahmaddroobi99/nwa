@@ -159,32 +159,6 @@ def manual_kill_jobs():
                 # print(e.output.decode())
                 pass
 
-def dask_compute_batch(computations, client, batch_size=None):
-    """ breaks down a list of computations into batches
-    """
-    # compute batch size according to number of workers
-    if batch_size is None:
-        # batch_size = len(client.scheduler_info()["workers"])
-        batch_size = sum(list(client.nthreads().values()))
-    # find batch indices
-    total_range = range(len(computations))
-    splits = max(1, np.ceil(len(total_range)/batch_size))
-    batches = np.array_split(total_range, splits)
-    # launch computations
-    outputs = []
-    for b in batches:
-        logging.info("batches: " + str(b)+ " / "+str(total_range))
-        out = dask.compute(*computations[slice(b[0], b[-1]+1)])
-        outputs.append(out)
-        
-        # try to manually clean up memory
-        # https://coiled.io/blog/tackling-unmanaged-memory-with-dask/
-        client.run(gc.collect)
-        client.run(trim_memory)  # should not be done systematically
-        
-    return sum(outputs, ())
-
-
 
 # ---------------------------------- core of the job to be done ---------------------------------- 
 
