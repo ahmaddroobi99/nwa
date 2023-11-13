@@ -3,13 +3,84 @@ import pandas as pd
 import xarray as xr
 import dask.array as da
 
-import xrft
-
 import matplotlib.pyplot as plt
 
+from scipy.special import kv, kvp, gamma
 from gptide import cov
 
+import xrft
+
 day = 86400
+
+# ------------------------------------- covariances ------------------------------------------
+
+# https://en.wikipedia.org/wiki/Mat%C3%A9rn_covariance_function
+
+# copy from https://github.com/TIDE-ITRH/gptide/blob/main/gptide/cov.py
+def matern_general(dx, eta, nu, l):
+    """General Matern base function"""
+    
+    cff1 = np.sqrt(2*nu)*np.abs(dx)/l
+    K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu)
+    K *= np.power(cff1, nu)
+    K *= kv(nu, cff1)
+    
+    K[np.isnan(K)] = np.power(eta, 2.)
+    
+    return K
+
+# new
+def matern_general_d1(dx, eta, nu, l):
+    """General Matern base function, first derivative"""
+    
+    cff0 = np.sqrt(2*nu)/l
+    cff1 = cff0*np.abs(dx)
+    K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu) * cff0
+    K *= (
+        nu*np.power(cff1, nu-1)*kv(nu, cff1)
+        + np.power(cff1, nu)*kvp(nu, cff1, n=1)
+    )
+    K[np.isnan(K)] = 0.
+    # but remember K'(d)/d converge toward K''(0) towards 0
+    
+    return K
+
+def matern_general_d2(dx, eta, nu, l):
+    """General Matern base function, second derivative"""
+    
+    cff0 = np.sqrt(2*nu)/l
+    cff1 = cff0*np.abs(dx)
+    K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu) * cff0**2
+    K *= (
+        nu*(nu-1)*np.power(cff1, nu-2)*kv(nu,cff1) 
+        + 2*nu*np.power(cff1, nu-1)*kvp(nu,cff1, n=1)
+        + np.power(cff1, nu)*kvp(nu, cff1, n=2)
+    )
+    K[np.isnan(K)] = -np.power(eta, 2.) * nu/(nu-1)/l**2
+    
+    return K
+
+
+def matern32_d1(dx, eta, l):
+    """Matern 3/2 function, first derivative"""
+    
+    cff0 = np.sqrt(3)/l
+    cff1 = cff0*np.abs(dx)
+    Kp = -np.power(eta, 2.)*cff0*cff1*np.exp(-cff1)
+    
+    return Kp
+
+def matern32_d2(dx, eta, l):
+    """Matern 3/2 function, second derivative"""
+    
+    cff0 = np.sqrt(3)/l
+    cff1 = cff0*np.abs(dx)
+    Kpp = np.power(eta, 2.) * cff0**2 *(-1+cff1)*np.exp(-cff1)
+    
+    return Kpp
+
+
+
 
 def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     
@@ -76,6 +147,8 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     
     return C, X, N, isotropy
 
+
+# ------------------------------------- synthetic field generation --------------------------------------
 
 def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotropy=False, seed=1234):
     """ Generate velocity fields
@@ -228,6 +301,8 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
 
     return ds
 
+
+# ------------------------------------- plotting ------------------------------------------
 
 def plot_snapshot(ds, i=None, **kwargs):
 
