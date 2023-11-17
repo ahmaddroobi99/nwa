@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 
 from scipy.special import kv, kvp, gamma
 from gptide import cov
+from gptide import GPtideScipy
+from gptide import mcmc
 
 import xrft
 
@@ -115,22 +117,22 @@ def get_cov_1D(cov_x, cov_t):
         # for covariances based on distances
         def Cu(x, y, d, λ):
             C = -(
-                y**2 * ut.matern_general_d2(d, 1., nu, λ)
-                + x**2 * ut.matern_general_d1(d, 1., nu, λ) / d
+                y**2 * matern_general_d2(d, 1., nu, λ)
+                + x**2 * matern_general_d1(d, 1., nu, λ) / d
             )/ d**2
-            C[np.isnan(C)] = -ut.matern_general_d2(d[np.isnan(C)], 1.0, nu, λ)
+            C[np.isnan(C)] = -matern_general_d2(d[np.isnan(C)], 1.0, nu, λ)
             return C
         def Cv(x, y, d, λ):
             C = -(
-                x**2 * ut.matern_general_d2(d, 1., nu, λ)
-                + y**2 * ut.matern_general_d1(d, 1., nu, λ) / d
+                x**2 * matern_general_d2(d, 1., nu, λ)
+                + y**2 * matern_general_d1(d, 1., nu, λ) / d
             ) / d**2
-            C[np.isnan(C)] = -ut.matern_general_d2(d[np.isnan(C)], 1.0, nu, λ)
+            C[np.isnan(C)] = -matern_general_d2(d[np.isnan(C)], 1.0, nu, λ)
             return C
         def Cuv(x, y, d, λ):
             C = x*y*(
-                    ut.matern_general_d2(d, 1., nu, λ)
-                    - ut.matern_general_d1(d, 1., nu, λ) / d
+                    matern_general_d2(d, 1., nu, λ)
+                    - matern_general_d1(d, 1., nu, λ) / d
                 ) / d**2
             C[np.isnan(C)] = 0.
             return C
@@ -139,22 +141,22 @@ def get_cov_1D(cov_x, cov_t):
         # for covariances based on distances
         def Cu(x, y, d, λ):
             C = -(
-                y**2 * ut.matern32_d2(d, 1., λ)
-                + x**2 * ut.matern32_d1(d, 1., λ) / d
+                y**2 * matern32_d2(d, 1., λ)
+                + x**2 * matern32_d1(d, 1., λ) / d
             )/ d**2
-            C[np.isnan(C)] = -ut.matern32_d2(d[np.isnan(C)], 1.0, λ)
+            C[np.isnan(C)] = -matern32_d2(d[np.isnan(C)], 1.0, λ)
             return C
         def Cv(x, y, d, λ):
             C = -(
-                x**2 * ut.matern32_d2(d, 1., λ)
-                + y**2 * ut.matern32_d1(d, 1., λ) / d
+                x**2 * matern32_d2(d, 1., λ)
+                + y**2 * matern32_d1(d, 1., λ) / d
             ) / d**2
-            C[np.isnan(C)] = -ut.matern32_d2(d[np.isnan(C)], 1.0, λ)
+            C[np.isnan(C)] = -matern32_d2(d[np.isnan(C)], 1.0, λ)
             return C
         def Cuv(x, y, d, λ):
             C = x*y*(
-                    ut.matern32_d2(d, 1., λ)
-                    - ut.matern32_d1(d, 1., λ) / d
+                    matern32_d2(d, 1., λ)
+                    - matern32_d1(d, 1., λ) / d
                 ) / d**2
             C[np.isnan(C)] = 0.
             return C
@@ -587,26 +589,26 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
 
 def inference_emcee(
     X, U, 
-    true_parameters,
-    covfunc,
+    noise, covparams,
+    covfunc, labels,
 ):
-
+        
     # Initial guess of the noise and covariance parameters (these can matter)
     if no_time:
-        noise, η, λx = true_parameters
+        η, λx = covparams
         noise_prior      = gpstats.truncnorm(noise, noise*2, noise/10, noise*10)     # noise
         covparams_priors = [gpstats.truncnorm(η, η*2, η/10, η*10),                   # eta
                             gpstats.truncnorm(λx, λx*2, λx/10, λx*10),               # λx
                            ]
     elif isotropy:
-        noise, η, λx, λt = true_parameters
+        η, λx, λt = covparams
         noise_prior      = gpstats.truncnorm(noise, noise*2, noise/10, noise*10)     # noise
         covparams_priors = [gpstats.truncnorm(η, η*2, η/10, η*10),                   # eta
                             gpstats.truncnorm(λx, λx*2, λx/10, λx*10),               # λx
                             gpstats.truncnorm(λt, λt*2, λt/10, λt*10),               # λt
                            ]
     else:
-        noise, η, λx, λy, λt = true_parameters
+        η, λx, λy, λt = covparams
         noise_prior      = gpstats.truncnorm(noise, noise*2, noise/10, noise*10)     # noise
         covparams_priors = [gpstats.truncnorm(η, η*2, η/10, η*10),                   # eta
                             gpstats.truncnorm(λx, λx*2, λx/10, λx*10),               # λx
@@ -659,20 +661,25 @@ def inference_emcee(
 
 def inference_MH(
     X, U,
-    true_parameters,
-    covfunc,    
+    noise, covparams,
+    covfunc, labels,
     n_mcmc = int(2e3),
+    steps = (1/20, 1/20, 1/20, 1/2),
+    tqdm_disable=False,
 ):
     
+    η, λx, λt = covparams
+
     # The order of everything is eta, ld, lt, noise
-    noise, η, λx, λt = true_parameters
     #step_sizes = np.array([.5, 5, .5, 0.005])
     #initialisations = np.array([12, 100, 5, 0.01])
-    step_sizes = np.array([η/20, λx/20, λt/10, noise/2])
+    step_sizes = np.array(
+        [v*s for v, s in zip([η, λx, λt, noise], steps)]
+    )
     initialisations = np.array([η, λx, λt, noise])
     lowers = np.repeat(0, 4)
     #uppers = np.array([100, 1000, 100, 0.05])
-    uppers = np.array([η*10, λx*10, λt*20, noise*5])
+    uppers = np.array([η*10, λx*10, λt*10, noise*5])
 
     # setup objects
     eta_samples = np.empty(n_mcmc)
@@ -693,9 +700,10 @@ def inference_MH(
     covparams_prop = initialisations.copy()[0:3]    
 
     # run mcmc
+    #gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
     gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
 
-    for i in tqdm(np.arange(1, n_mcmc)):
+    for i in tqdm(np.arange(1, n_mcmc), disable=tqdm_disable):
 
         eta_proposed = np.random.normal(eta_samples[i-1], step_sizes[0], 1)
         ld_proposed = np.random.normal(ld_samples[i-1], step_sizes[1], 1)
@@ -718,7 +726,7 @@ def inference_MH(
             gp_current = gp_proposed
 
         covparams_prop = np.array([eta_proposed, ld_proposed, lt_proposed])
-        gp_proposed = GPtideScipy(X, X, noise_proposed, cov_func, covparams_prop)
+        gp_proposed = GPtideScipy(X, X, noise_proposed, covfunc, covparams_prop)
 
         lp_current = gp_current.log_marg_likelihood(U)
         lp_proposed = gp_proposed.log_marg_likelihood(U)
@@ -758,6 +766,7 @@ def inference_MH(
 
     #return noise_samples, eta_samples, ld_samples, lt_samples, 
     accepted_fraction = float(ds["accept"].mean())
+    print(f"accepted fraction = {accepted_fraction*100:.1f} %")
 
     # keep only accepted samples
     #ds = ds.where(ds.accept==1, drop=True)
