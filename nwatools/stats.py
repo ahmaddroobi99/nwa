@@ -700,7 +700,6 @@ def inference_MH(
     covparams_prop = initialisations.copy()[0:3]    
 
     # run mcmc
-    #gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
     gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
 
     for i in tqdm(np.arange(1, n_mcmc), disable=tqdm_disable):
