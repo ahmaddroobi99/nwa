@@ -663,8 +663,8 @@ def inference_MH(
     X, U,
     noise, covparams,
     covfunc, labels,
-    n_mcmc = int(2e3),
-    steps = (1/20, 1/20, 1/20, 1/2),
+    n_mcmc = 20_000,
+    steps = (1/5, 1/5, 1/5, 1/2),
     tqdm_disable=False,
 ):
     
@@ -679,7 +679,7 @@ def inference_MH(
     initialisations = np.array([η, λx, λt, noise])
     lowers = np.repeat(0, 4)
     #uppers = np.array([100, 1000, 100, 0.05])
-    uppers = np.array([η*10, λx*10, λt*10, noise*5])
+    uppers = np.array([η*10, λx*10, λt*10, noise*10])
 
     # setup objects
     eta_samples = np.empty(n_mcmc)
