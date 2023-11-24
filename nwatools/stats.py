@@ -1,8 +1,11 @@
+import os
 from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+import dask
 import dask.array as da
 
 import matplotlib.pyplot as plt
@@ -219,7 +222,7 @@ def kernel_3d_iso(x, xpr, params, C):
 
 def kernel_3d_iso_uv(x, xpr, params, C):
     """
-    3D kernel, one velocity component
+    3D spatially isotropic kernel, two velocity components
     
     Inputs:
         x: matrices input points [N,3]
@@ -254,6 +257,42 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     #_Cuv  = Cuv(_x, _y, _d, ld)
     #C *= np.block([[_Cu, _Cuv],[_Cuv, _Cv]])
     C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
+    C *= eta**2
+    
+    return C
+
+def kernel_3d_iso_uv_traj(x, xpr, params, C):
+    """
+    3D spatially isotropic kernel, two velocity components
+    decorrelate data with different id
+    
+    Inputs:
+        x: matrices input points [N,3]
+        xpr: matrices output points [M,3]
+        params: tuple length 3
+            eta: standard deviation
+            ld: spatial scale
+            lt: t length scale
+            
+    """
+    eta, ld, lt = params
+    Cu, Cv, Cuv, Ct = C
+    
+    # Build the covariance matrix
+    n = x.shape[0]//2
+    _x = x[:n,0,None] - xpr.T[:n,0,None].T
+    _y = x[:n,1,None] - xpr.T[:n,1,None].T
+    _d = np.sqrt( _x**2 + _y**2 )
+    #
+    C = np.ones((2*n,2*n))
+    C[:n,:n] *= Cu(_x, _y, _d, ld)
+    C[:n,n:] *= Cuv(_x, _y, _d, ld)
+    C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
+    C[n:,n:] *= Cv(_x, _y, _d, ld)
+    #
+    C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
+    # decorrelate different trajectories (moorings/drifters)
+    C *= ( (x[:,3,None] - xpr.T[:,3,None].T)==0 ).astype(int)
     C *= eta**2
     
     return C
@@ -591,6 +630,8 @@ def inference_emcee(
     X, U, 
     noise, covparams,
     covfunc, labels,
+    isotropy=True, no_time=False,
+    **kwargs,
 ):
         
     # Initial guess of the noise and covariance parameters (these can matter)
@@ -666,6 +707,7 @@ def inference_MH(
     n_mcmc = 20_000,
     steps = (1/5, 1/5, 1/5, 1/2),
     tqdm_disable=False,
+    **kwargs,
 ):
     
     η, λx, λt = covparams
@@ -778,6 +820,321 @@ def inference_MH(
     ds.attrs["inference"] = "MH"
     ds.attrs["i_MAP"] = i_map
 
+    return ds
+
+
+def mooring_inference(
+    dsf, seed,
+    covparams, covfunc, labels, N, noise,
+    inference="MH", uv=True, no_time=False,
+    flow_scale=None, dx=None,
+    write=None, overwrite=True,
+    **kwargs,
+):
+    """ run inference for moorings """
+
+    Nt, Nxy = N
+    
+    if write is not None:
+        data_dir, case = write
+        output_file = os.path.join(
+            data_dir,
+            case+f"_moorings_s{seed}_Nxy{Nxy}.nc",
+        )
+        if flow_scale is not None:
+            output_file = output_file.replace(".nc", f"_fs{flow_scale:.2f}.nc")
+        if os.path.isfile(output_file) and not overwrite:
+            return None
+    
+    # set random seed - means same mooring positions will be selected across different flow_scales
+    np.random.seed(seed)
+    
+    # randomly select mooring location
+    ds = dsf.stack(trajectory=["x", "y"])
+    if dx is not None:
+        assert Nxy>1, "Nxy must be >1 if dx is specified"
+        if Nxy==2:
+            # select in a circular shell around the first point
+            traj_selection = [np.random.choice(ds.trajectory.values, 1)[0]]
+            p0 = ds.sel(trajectory=traj_selection[0])[["x", "y"]]
+            d = np.sqrt( (ds["x"]-float(p0.x))**2 + (ds["y"]-float(p0.y))**2 )
+            d = d.where( (d>dx*.9) & (d<dx*1.1), drop=True )
+            traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
+        else:
+            #Nxy==3: equilateral triangle
+            assert False, "Not implemented"
+    else:
+        traj_selection = np.random.choice(ds.trajectory.values, Nxy, replace=False)
+    ds = ds.sel(trajectory=traj_selection)
+    ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
+    # subsample temporally
+    ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
+
+    # set up inference
+    if no_time:
+        u, v, x, y = xr.broadcast(ds.U, ds.V, ds.x, ds.y)
+        assert u.shape==v.shape==x.shape==y.shape
+        x = x.values.ravel()
+        y = y.values.ravel()
+        X = np.hstack([x[:,None], y[:,None],])
+    else:
+        #u, v, x, y, t = xr.broadcast(ds.U, ds.V, ds.x, ds.y, ds.time)
+        u, v, x, y, t, traj = xr.broadcast(ds.U, ds.V, ds.x, ds.y, ds.time, ds.traj)
+        assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
+        x = x.values.ravel()
+        y = y.values.ravel()
+        t = t.values.ravel()
+        traj = traj.values.ravel()
+        #X = np.hstack([x[:,None], y[:,None], t[:,None]])
+        X = np.hstack([x[:,None], y[:,None], t[:,None], traj[:,None]])
+    u = u.values.ravel()[:, None]
+    v = v.values.ravel()[:, None]
+    if flow_scale is not None:
+        u = u * flow_scale
+        v = v * flow_scale
+        # update covparams
+        covparams = covparams[:]
+        covparams[0] = covparams[0] * flow_scale
+    # add noise
+    u += np.random.randn(*u.shape)*noise
+    v += np.random.randn(*v.shape)*noise
+    if uv:
+        X = np.vstack([X, X])
+        U = np.vstack([u, v])
+    else:
+        U = u        
+        
+    # reset seed here
+    np.random.seed(seed)
+    
+    # run
+    if inference=="MH":
+        ds = inference_MH(
+            X, U, noise, covparams, covfunc, labels, 
+            no_time=no_time, 
+            **kwargs,
+        )
+    elif inference=="emcee":
+        ds = inference_emcee(
+            X, U, noise, covparams, covfunc, labels, 
+            no_time=no_time, 
+            **kwargs,
+        )
+    ds["true_parameters"] = ("parameter", np.array([noise]+covparams))
+    ds["seed"] = seed
+    if flow_scale is not None:
+        ds["flow_scale"] = flow_scale
+    
+    # store or not and return
+    if write is not None:
+        ds.to_netcdf(output_file, mode="w")
+        return output_file
+    else:
+        return ds
+
+def run_mooring_ensembles(
+    Ne, 
+    dsf,
+    covparams, covfunc, labels, N, noise,
+    step=1/5, **kwargs,
+):
+    """ wrap mooring_inference to run ensembles """
+
+    dkwargs = dict(tqdm_disable=True, n_mcmc=20_000)
+    dkwargs.update(**kwargs)
+
+    # MH default
+    dkwargs["steps"] = (step, step, step, 1/2)
+
+    mooring_inference_delayed = dask.delayed(mooring_inference)
+    datasets = [
+        mooring_inference_delayed(
+            dsf, seed, 
+            covparams, covfunc, labels, N, noise, 
+            **dkwargs,
+        ) 
+        for seed in range(Ne)
+    ]
+    datasets = dask.compute(datasets)[0]
+    ds = xr.concat(datasets, "ensemble")
+    ds = ds.isel(i=slice(0,None,5))
+    return ds
+
+def _open_drifter_file(data_dir, case, flow_scale=None):
+    
+    nc_file = os.path.join(data_dir, case+f"_drifters.nc")
+    if flow_scale is not None:
+        nc_file = nc_file.replace(".nc", f"_f{flow_scale:.2f}.nc")
+    
+    ds = xr.open_dataset(nc_file)
+    ds = ds.drop("trajectory").rename_dims(dict(traj="trajectory")) # tmp
+    #ds = ds.chunk(dict(trajectory=100, obs=-1))
+    #ds = massage_coords(ds)
+    ds = ds.rename(lon="x", lat="y")
+    ds["x"] = ds["x"]/1e3
+    ds["y"] = ds["y"]/1e3    
+    ds = ds.assign_coords(t=(ds["time"] - ds["time"][0,0])/pd.Timedelta("1D"))
+
+    # trajectory reaching the end of the simulation
+    maxt = ds.time.max("obs")
+    n0 = ds.trajectory.size
+    ds = ds.where( ~np.isnan(maxt), drop=True)
+    ns = ds.trajectory.size
+    survival_rate = ns/n0*100
+    print(f"{survival_rate:.1f}% of trajectories survived")
+    #
+    dt = ds.t.differentiate("obs")*day
+    ds["u"] = ds.x.differentiate("obs")/dt*1e3 # x are in km
+    ds["v"] = ds.y.differentiate("obs")/dt*1e3 # y are in km
+    #
+    t = ds.t
+    #ds = ds.drop(["t", "time"])
+    ds = ds.drop(["time"])
+    ds["obs"] = ds.t.isel(trajectory=0)
+    ds = ds.drop("t").rename(obs="time")    
+
+    return ds, survival_rate
+
+def drifter_inference(
+    drifter_dir, case, seed, 
+    covparams, covfunc, labels, N, noise,
+    inference="MH", uv=True, no_time=False,
+    flow_scale=None, dx=None,
+    write=None, overwrite=True,    
+    **kwargs,
+):
+    """ run inference for drifters """
+
+    Nt, Nxy = N
+
+    if write is not None:
+        data_dir, _ = write
+        output_file = os.path.join(
+            data_dir,
+            case+f"_drifters_s{seed}_Nxy{Nxy}.nc",
+        )
+        if flow_scale is not None:
+            output_file = output_file.replace(".nc", f"_f{flow_scale:.2f}.nc")    
+        if os.path.isfile(output_file) and not overwrite:
+            return
+
+    # parcels dataset
+    ds, survival_rate = _open_drifter_file(drifter_dir, case, flow_scale=flow_scale)
+
+    # set random seed
+    np.random.seed(seed)
+        
+    # randomly select Nxy trajectories
+    if dx is not None:
+        # select drifters based on their relative initial positions
+        assert Nxy>1, "Nxy must be >1 if dx is specified"
+        ds0 = ds.isel(time=0)
+        if Nxy==2:
+            # select in a circular shell around the first point
+            traj_selection = [np.random.choice(ds0.trajectory.values, 1)[0]]
+            p0 = ds0.sel(trajectory=traj_selection[0])[["x", "y"]]
+            d = np.sqrt( (ds0["x"]-float(p0.x))**2 + (ds0["y"]-float(p0.y))**2 )
+            d = d.where( (d>dx*.9) & (d<dx*1.1), drop=True )
+            traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
+        else:
+            #Nxy==3: equilateral triangle
+            assert False, "Not implemented"
+    else:
+        traj_selection = np.random.choice(ds.trajectory.values, Nxy, replace=False)
+    ds = ds.sel(trajectory=traj_selection)
+    ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
+
+    # subsample temporally
+    ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
+
+    # massage inputs to inference problem
+    if no_time:
+        u, v, x, y = xr.broadcast(ds.u, ds.v, ds.x, ds.y)
+        assert u.shape==v.shape==x.shape==y.shape
+        x = x.values.ravel()
+        y = y.values.ravel()
+        X = np.hstack([x[:,None], y[:,None],])
+    else:
+        #u, v, x, y, t = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time)
+        u, v, x, y, t, traj = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time, ds.traj)
+        assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
+        x = x.values.ravel()
+        y = y.values.ravel()
+        t = t.values.ravel()
+        traj = traj.values.ravel()
+        #X = np.hstack([x[:,None], y[:,None], t[:,None]])
+        X = np.hstack([x[:,None], y[:,None], t[:,None], traj[:,None]])
+    u = u.values.ravel()[:, None]
+    v = v.values.ravel()[:, None]
+    # add noise
+    u += np.random.randn(*u.shape)*noise
+    v += np.random.randn(*v.shape)*noise
+    if uv:
+        X = np.vstack([X, X])
+        U = np.vstack([u, v])
+    else:
+        U = u
+
+    if flow_scale is not None:
+        # update covparams
+        covparams = covparams[:]
+        covparams[0] = covparams[0] * flow_scale
+    
+    # reset seed here
+    np.random.seed(seed)
+    
+    if inference=="MH":
+        ds = inference_MH(
+            X, U, noise, covparams, covfunc, labels, 
+            no_time=no_time, 
+            **kwargs,
+        )
+    elif inference=="emcee":
+        ds = inference_emcee(
+            X, U, noise, covparams, covfunc, labels, 
+            no_time=no_time, 
+            **kwargs,
+        )
+    ds["true_parameters"] = ("parameter", np.array([noise]+covparams))
+    ds["seed"] = seed
+    if flow_scale is not None:
+        ds["flow_scale"] = flow_scale
+
+    # store or not and return
+    if write is not None:
+        ds.to_netcdf(output_file, mode="w")
+        return output_file
+    else:
+        return ds
+    
+def run_drifter_ensembles(
+    drifter_dir, case, 
+    Ne,
+    covparams, covfunc, labels, N, noise,
+    step=1/5,
+    **kwargs,
+):
+    """ wrap drifter_inference to run ensembles """
+
+    dkwargs = dict(tqdm_disable=True, n_mcmc=20_000)
+    dkwargs.update(**kwargs)
+
+    # MH
+    dkwargs["steps"] = (step, step, step, 1/2)
+
+    drifter_inference_delayed = dask.delayed(drifter_inference)
+    datasets = [
+        drifter_inference_delayed(
+            drifter_dir, case, 
+            seed,
+            covparams, covfunc, labels, N, noise,
+            **dkwargs,
+        ) 
+        for seed in range(Ne)
+    ]
+    datasets = dask.compute(datasets)[0]
+    ds = xr.concat(datasets, "ensemble")
+    ds = ds.isel(i=slice(0,None,5))
     return ds
 
 
