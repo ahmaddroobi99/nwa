@@ -624,8 +624,75 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
 
 # ------------------------------------- inference -----------------------------------------
 
-# emcee of the inference
+def prepare_inference(
+    data_dir, case, N, 
+    uv, no_time, parameter_eta_formulation, traj_decorrelation,
+):
 
+    Nxy, Nt = N
+
+    # load eulerian flow
+    flow_file = os.path.join(data_dir, case+"_flow.zarr")
+    dsf = xr.open_dataset(os.path.join(data_dir, flow_file))
+    dsf["time"] = dsf["time"]/pd.Timedelta("1D")
+    U = dsf.attrs["U"] # useful for computation of alpha much latter
+
+    # problem parameters (need to be consistent with data generation notebook)
+    p = dsf.attrs
+    for k, v in p.items():
+        print(k, v)
+    η = p["eta"]  # streamfunction amplitude
+    #
+    λx = p["lambda_x"]   # km
+    λy = p["lambda_y"]   # km
+    λt = p["lambda_t"]   # days
+
+    # derived velocity parameter
+    γ = η / λx 
+
+    #Lx = float(dsf.x.max()-dsf.x.min())
+    #Ly = float(dsf.y.max()-dsf.y.min())
+    # km, km this should not matter
+
+    # get 1D covariances
+    C, Ct, isotropy = get_cov_1D(p["cov_x"], p["cov_t"])
+    Cu, Cv, Cuv = C
+
+    # set covariance parameters
+    if no_time:
+        if uv:
+            covfunc = lambda x, xpr, params: kernel_2d_iso_uv(x, xpr, params, (Cu, Cv, Cuv))
+        else:
+            covfunc = lambda x, xpr, params: kernel_2d_iso_u(x, xpr, params, Cu)
+        covparams = [η, λx]
+        labels = ['σ','η','λx',]
+    elif isotropy:
+        if uv:
+            if parameter_eta_formulation:
+                covfunc = lambda x, xpr, params: kernel_3d_iso_uv(x, xpr, params, (Cu, Cv, Cuv, Ct))
+                covparams = [η, λx, λt]
+                labels = ['σ','η','λx','λt']
+            else:
+                def covfunc(x, xpr, params):
+                    # params contains (nu=eta/ld, ld, lt) and needs to be converted to (eta, ld, lt)
+                    params = (params[0]*params[1], *params[1:])
+                    if traj_decorrelation:
+                        return kernel_3d_iso_uv_traj(x, xpr, params, (Cu, Cv, Cuv, Ct))
+                    else:
+                        return kernel_3d_iso_uv(x, xpr, params, (Cu, Cv, Cuv, Ct))
+                covparams = [γ, λx, λt]
+                labels = ['σ','γ','λx','λt']
+        else:
+            covfunc = lambda x, xpr, params: kernel_3d_iso_u(x, xpr, params, (Cu, Ct))
+            covparams = [η, λx, λt]
+            labels = ['σ','η','λx','λt']
+    else:
+        covfunc = lambda x, xpr, params: kernel_3d(x, xpr, params, (Cx, Cy, Ct))
+        covparams = [η, λx, λy, λt]
+        labels = ['σ','η','λx','λy','λt']
+    return dsf, covfunc, covparams, labels
+
+## emcee
 def inference_emcee(
     X, U, 
     noise, covparams,
@@ -964,7 +1031,7 @@ def _open_drifter_file(data_dir, case, flow_scale=None):
     
     nc_file = os.path.join(data_dir, case+f"_drifters.nc")
     if flow_scale is not None:
-        nc_file = nc_file.replace(".nc", f"_f{flow_scale:.2f}.nc")
+        nc_file = nc_file.replace(".nc", f"_fs{flow_scale:.2f}.nc")
     
     ds = xr.open_dataset(nc_file)
     ds = ds.drop("trajectory").rename_dims(dict(traj="trajectory")) # tmp
@@ -1097,6 +1164,7 @@ def drifter_inference(
         )
     ds["true_parameters"] = ("parameter", np.array([noise]+covparams))
     ds["seed"] = seed
+    ds["survival_rate"] = survival_rate
     if flow_scale is not None:
         ds["flow_scale"] = flow_scale
 
@@ -1247,4 +1315,82 @@ def plot_spectra(ds, v, yref=1e-1, slopes=[-4,-5,-6], **kwargs):
     ax.set_yscale("log")
     ax.legend()
     ax.set_title(f"{v}: isotropic spectrum")
+
+## inference result
+def convert_to_az(d, labels, burn=0):
+    output = {}
+    for ii, ll in enumerate(labels):
+        output.update({ll:d[burn:,ii]})
+    return az.convert_to_dataset(output)
+
+def plot_inference(ds, stack=False, corner_plot=True, xlim=True, burn=None):
+
+    labels = ds["parameter"].values
     
+    #samples = ds.samples.values
+    #samples_az = convert_to_az(samples, labels)
+    if burn:
+        ds = ds.isel(i=slice(burn, None))
+    if stack:
+        samples = ds.stack(points=("i", "ensemble")).samples.values.T
+        samples_az = convert_to_az(samples, labels)
+        density_data = [samples_az[labels],]
+    else:
+        samples = [ds.samples.sel(ensemble=e) for e in ds.ensemble]
+        samples_az = [convert_to_az(s, labels) for s in samples]
+        density_data = [s[labels] for s in samples_az]
+    
+    #density_labels = ['posterior',]
+    
+    axs = az.plot_density(   density_data,
+                             shade=0.1,
+                             grid=(1, 5),
+                             textsize=12,
+                             figsize=(15,4),
+                             #data_labels=tuple(density_labels),
+                             hdi_prob=0.995)
+
+    i=0
+    _ds = ds.sel(ensemble=0)
+    for t, ax in zip([noise,]+list(covparams), axs[0]):
+        #print(t, ax)
+        ax.axvline(t, color="k", ls="-", label="truth") # true value
+        if isinstance(xlim, tuple):
+            ax.set_xlim(*xlim)
+        elif xlim:
+            ax.set_xlim(0, t*2)
+        if i==0:
+            ax.legend()
+        i+=1 
+    
+    if corner_plot:
+        samples = ds.stack(points=("i", "ensemble")).samples.values.T
+        fig = corner.corner(
+            samples, 
+            show_titles=True,
+            labels=labels,
+            plot_datapoints=True,
+            quantiles=[0.16, 0.5, 0.84],
+        )
+    
+def traceplots(ds, MAP=True, burn=None):
+
+    if burn:
+        ds = ds.isel(i=slice(burn, None))
+    
+    fig, axes = plt.subplots(2,2, sharex=True, figsize=(15,6))
+    
+    for v, ax in zip(ds["parameter"], axes.flatten()[:ds.parameter.size]):
+        ds.samples.sel(parameter=v).plot(ax=ax, hue="ensemble", add_legend=False)
+        #if MAP:
+        #    ax.axvline(ds.attrs["i_MAP"], color="b", lw=2)
+        ax.set_title(v.values)
+        ax.set_ylabel("")
+        #print(v.values)
+
+    fig, ax = plt.subplots(1,1, figsize=(15,3))
+    ds["log_prob"].plot(ax=ax, hue="ensemble")
+    #if MAP:
+    #    ax.axvline(ds.attrs["i_MAP"], color="b", lw=2)
+    ax.set_ylabel("")
+    ax.set_title("log_prob")
