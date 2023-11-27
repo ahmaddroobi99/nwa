@@ -50,6 +50,7 @@ jlab.pbs.o*
 *.pbs.o*
 *.log
 *.nodefile
+stats/distributed.log*
 
 # specific data 
 sandbox/data

@@ -14,6 +14,8 @@ from scipy.special import kv, kvp, gamma
 from gptide import cov
 from gptide import GPtideScipy
 from gptide import mcmc
+import corner
+import arviz as az
 
 import xrft
 
@@ -625,11 +627,9 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
 # ------------------------------------- inference -----------------------------------------
 
 def prepare_inference(
-    data_dir, case, N, 
+    data_dir, case,
     uv, no_time, parameter_eta_formulation, traj_decorrelation,
 ):
-
-    Nxy, Nt = N
 
     # load eulerian flow
     flow_file = os.path.join(data_dir, case+"_flow.zarr")
@@ -889,6 +889,37 @@ def inference_MH(
 
     return ds
 
+def select_traj_core(ds, Nxy, dx):
+    ds = ds.isel(time=0)
+    tolerance = .1
+    if dx is not None:
+        assert Nxy>1, "Nxy must be >1 if dx is specified"
+        if Nxy==2:
+            # select in a circular shell around the first point
+            traj_selection = [np.random.choice(ds.trajectory.values, 1)[0]]
+            p0 = ds.sel(trajectory=traj_selection[0])[["x", "y"]]
+            d = np.sqrt( (ds["x"]-float(p0.x))**2 + (ds["y"]-float(p0.y))**2 )
+            d = d.where( (d>dx*(1-tolerance)) & (d<dx*(1+tolerance)), drop=True )
+            if d.trajectory.size==0:
+                return
+            traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
+        else:
+            #Nxy==3: equilateral triangle
+            assert False, "Not implemented"
+    else:
+        traj_selection = np.random.choice(ds.trajectory.values, Nxy, replace=False)
+    return traj_selection
+
+def select_traj(*args, repeats=5):
+    i, fail = 0, True
+    while i<repeats and fail:
+        s = select_traj_core(*args)
+        if s is not None:
+            fail = False
+        i+=1
+    if fail:
+        assert False, "could not select trajectories"
+    return s
 
 def mooring_inference(
     dsf, seed,
@@ -918,20 +949,7 @@ def mooring_inference(
     
     # randomly select mooring location
     ds = dsf.stack(trajectory=["x", "y"])
-    if dx is not None:
-        assert Nxy>1, "Nxy must be >1 if dx is specified"
-        if Nxy==2:
-            # select in a circular shell around the first point
-            traj_selection = [np.random.choice(ds.trajectory.values, 1)[0]]
-            p0 = ds.sel(trajectory=traj_selection[0])[["x", "y"]]
-            d = np.sqrt( (ds["x"]-float(p0.x))**2 + (ds["y"]-float(p0.y))**2 )
-            d = d.where( (d>dx*.9) & (d<dx*1.1), drop=True )
-            traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
-        else:
-            #Nxy==3: equilateral triangle
-            assert False, "Not implemented"
-    else:
-        traj_selection = np.random.choice(ds.trajectory.values, Nxy, replace=False)
+    traj_selection = select_traj(ds, Nxy, dx)
     ds = ds.sel(trajectory=traj_selection)
     ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
     # subsample temporally
@@ -1090,24 +1108,9 @@ def drifter_inference(
 
     # set random seed
     np.random.seed(seed)
-        
+    
     # randomly select Nxy trajectories
-    if dx is not None:
-        # select drifters based on their relative initial positions
-        assert Nxy>1, "Nxy must be >1 if dx is specified"
-        ds0 = ds.isel(time=0)
-        if Nxy==2:
-            # select in a circular shell around the first point
-            traj_selection = [np.random.choice(ds0.trajectory.values, 1)[0]]
-            p0 = ds0.sel(trajectory=traj_selection[0])[["x", "y"]]
-            d = np.sqrt( (ds0["x"]-float(p0.x))**2 + (ds0["y"]-float(p0.y))**2 )
-            d = d.where( (d>dx*.9) & (d<dx*1.1), drop=True )
-            traj_selection.append(np.random.choice(d.trajectory.values, 1)[0])
-        else:
-            #Nxy==3: equilateral triangle
-            assert False, "Not implemented"
-    else:
-        traj_selection = np.random.choice(ds.trajectory.values, Nxy, replace=False)
+    traj_selection = select_traj(ds, Nxy, dx)
     ds = ds.sel(trajectory=traj_selection)
     ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
 
@@ -1350,9 +1353,15 @@ def plot_inference(ds, stack=False, corner_plot=True, xlim=True, burn=None):
                              #data_labels=tuple(density_labels),
                              hdi_prob=0.995)
 
+    if "ensemble" in ds.dims:
+        cov_params = ds.true_parameters.isel(ensemble=0).values
+    else:
+        cov_params = ds.true_parameters.values
+    
     i=0
     _ds = ds.sel(ensemble=0)
-    for t, ax in zip([noise,]+list(covparams), axs[0]):
+    #for t, ax in zip([noise,]+list(covparams), axs[0]):
+    for t, ax in zip(cov_params, axs[0]):
         #print(t, ax)
         ax.axvline(t, color="k", ls="-", label="truth") # true value
         if isinstance(xlim, tuple):
