@@ -9,6 +9,7 @@ import dask
 import dask.array as da
 
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 
 from scipy.special import kv, kvp, gamma
 from gptide import cov
@@ -1403,3 +1404,24 @@ def traceplots(ds, MAP=True, burn=None):
     #    ax.axvline(ds.attrs["i_MAP"], color="b", lw=2)
     ax.set_ylabel("")
     ax.set_title("log_prob")
+
+
+
+def label_and_print(fig, axs, fig_name):
+    """ add labels on figures and print into files """
+
+
+    if axs is not None:
+        for label, ax in axs.items():
+            # label physical distance in and down:
+            trans = mtransforms.ScaledTranslation(10/72, -5/72, fig.dpi_scale_trans)
+            ax.text(0.0, 1.0, label, transform=ax.transAxes + trans,
+                    fontsize='medium', verticalalignment='top', fontfamily='serif',
+                    bbox=dict(facecolor='1.0', edgecolor='none', pad=3.0))
+
+    fig_dir = os.path.join(os.getcwd(), "figs")
+
+    for fmt in ["eps", "png"]:
+        _fig_name = os.path.join(fig_dir, fig_name+"."+fmt)
+        fig.savefig(_fig_name)
+        print(f"scp dunree:{_fig_name} .")

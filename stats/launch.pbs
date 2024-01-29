@@ -9,7 +9,9 @@
 # cd to the directory you submitted your job
 cd $PBS_O_WORKDIR
 
-setenv PATH ${HOME}/.miniconda3/envs/equinox/bin:${PATH}
+#setenv PATH ${HOME}/.miniconda3/envs/equinox/bin:${PATH}
+#source /appli/anaconda/versions/2022.10/etc/profile.d/conda.csh
+setenv PATH /home1/datawork/aponte/miniconda3/envs/equinox/bin:${PATH}
 
 setenv OMP_NUM_THREADS 1
 setenv NUMEXPR_NUM_THREADS 1

@@ -30,17 +30,21 @@ uv = True # True if u and v are observed
 parameter_eta_formulation = False # eta vs nu formulation
 noise = 0.01 # observation noise added to u/v
 no_time = False # activates time inference
-#traj_decorrelation = False  # artificially decorrelate different moorings/drifters
-traj_decorrelation = True  # artificially decorrelate different moorings/drifters
+traj_decorrelation = False  # artificially decorrelate different moorings/drifters
+#traj_decorrelation = True  # artificially decorrelate different moorings/drifters
 
 # number of points used for inference#
 #Nxy, Nt = 1, 50
-Nxy, Nt = 2, 50
+#Nxy, Nt = 2, 50
+Nxy, Nt = 4, 50
+#Nxy, Nt = 8, 50
+#Nxy, Nt = 16, 50
 #Nxy, Nt = 5, 50
 #Nxy, Nt = 10, 50
 
 # run multiple Nxy at once
 Nxy = [1, 2, 4, 8, 16]
+Nxy = [2, 4, 8, 16]
 
 # number of ensembles
 #Ne = 10 # dev
@@ -71,8 +75,11 @@ def run():
     # ## mooring inference
     logging.info("starting mooring inference ...")
 
-    def run_mooring(Nxy, dx):    
-        logging.info(f" Nxy= {Nxy}, dx={dx} - start")
+    def run_mooring(Nxy, dx):
+        if dx is not None:
+            logging.info(f" Nxy= {Nxy}, dx={dx} - start")
+        else:
+            logging.info(f" Nxy= {Nxy} - start")
         
         # build output file name
         nc = os.path.join(data_dir, case+f"_moorings_ensemble_Nxy{Nxy}.nc")
