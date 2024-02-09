@@ -406,37 +406,54 @@ def kernel_1d(x, xpr, params, C):
     
     return C
 
-def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
+def generate_covariances(model, N, d, λ):
+    """ Generate spatial and temporal covariances
     
-    print(f"Covariance models: space={model[0]} , time={model[1]}")
+    """
     
-    N = (Nx, Ny, Nt)
+    Cs, Xs, Ns, isotropy = generate_spatial_covariances(
+        model[0], N[0], N[1], d[0], d[1], λ[0], λ[1],
+    )
+
+    Ct, Xt, Nt = generate_temporal_covariance(
+        model[1], N[2], d[2], λ[2],
+    )
+    
+    X = (*Xs, Xt)
+    Ns = (*Ns, Nt)
+    if isotropy:
+        C = (Cs, Ct)
+    else:
+        C = (*Cs, Ct)
+
+    return C, X, N, isotropy
+        
+        
+def generate_spatial_covariances(model, Nx, Ny, dx, dy, λx, λy):
+    """ Generate spatial covariances"""
+            
+    print(f"Space covariance model: {model}")
+    
+    N = (Nx, Ny)
     t_x = np.arange(Nx)[:, None]*dx
     t_y = np.arange(Ny)[:, None]*dy
-    t_t = np.arange(Nt)[:, None]*dt
-
-    # time
-    if model[1]=="matern12":
-        Cov_t = cov.matern12(t_t, t_t.T, λt) # -2 high frequency slope
-    elif model[1]=="matern32":
-        Cov_t = cov.matern32(t_t, t_t.T, λt) # -4 high frequency slope
 
     # space
     Cov_x, Cov_y, Cov_d = (None,)*3
     isotropy=False
-    if model[0] == "matern12_xy":
+    if model == "matern12_xy":
         Cov_x = cov.matern12(t_x, t_x.T, λx) # -2 spectral slope
         Cov_y = cov.matern12(t_y, t_y.T, λy) # -2 spectral slope
-    elif model[0] == "matern32_xy":
+    elif model == "matern32_xy":
         Cov_x = cov.matern32(t_x, t_x.T, λx) # -4 spectral slope
-        Cov_y = cov.matern32(t_y, _xyt_y.T, λy) # -4 spectral slope
-    elif model[0] == "matern2_xy":
+        Cov_y = cov.matern32(t_y, t_y.T, λy) # -4 spectral slope
+    elif model == "matern2_xy":
         Cov_x = cov.matern_general(np.abs(t_x - t_x.T), 1., 2, λx) # -5 spectral slope
         Cov_y = cov.matern_general(np.abs(t_y - t_y.T), 1., 2, λy) # -5 spectral slope
-    elif model[0] == "matern52_xy":
+    elif model == "matern52_xy":
         Cov_x = cov.matern52(t_x, t_x.T, λx) # -6 spectral slope
         Cov_y = cov.matern52(t_y, t_y.T, λy) # -6 spectral slope
-    elif model[0] == "expquad":
+    elif model == "expquad":
         jitter = 1e-10
         Cov_x = cov.expquad(t_x, t_x.T, λx) + 1e-10 * np.eye(Nx)
         Cov_y = cov.expquad(t_y, t_y.T, λy) + 1e-10 * np.eye(Nx)
@@ -448,27 +465,46 @@ def generate_covariances(model, Nx, Ny, Nt, dx, dy, dt, λx, λy, λt):
     C = (Cov_x, Cov_y, Cov_t)
 
     # for covariances based on horizontal distances
-    isotropy = ("iso" in model[0])
+    isotropy = ("iso" in model)
     if isotropy:
         t_x2 = (t_x   + t_y.T*0).ravel()[:, None]
         t_y2 = (t_x*0 + t_y.T  ).ravel()[:, None]
         t_xy = np.sqrt( (t_x2 - t_x2.T)**2 + (t_y2 - t_y2.T)**2 )        
-        if model[0] == "matern2_iso":
+        if model == "matern2_iso":
             Cov_d = cov.matern_general(t_xy, 1., 2, λx) # -5 spectral slope
             C = (Cov_d, Cov_t)
-        elif model[0] == "matern32_iso":
+        elif model == "matern32_iso":
             Cov_d = cov.matern32(t_xy, 0., λx) # -4 spectral slope
             C = (Cov_d, Cov_t)
         else:
-            assert False, model[0]+" is not implemented"
+            assert False, model+" is not implemented"
         
     # Input data points
     xd = (np.arange(0,Nx)[:,None]-1/2)*dx
     yd = (np.arange(0,Ny)[:,None]-1/2)*dy
-    td = (np.arange(0,Nt)[:,None]-1/2)*dt
-    X = xd, yd, td
+    X = xd, yd
     
     return C, X, N, isotropy
+
+
+def generate_temporal_covariance(model, Nt, dt, λt):
+    """ Generate temporal covariance"""
+    
+    print(f"Covariance models: time={model}")
+    
+    t_t = np.arange(Nt)[:, None]*dt
+
+    if model=="matern12":
+        Cov_t = cov.matern12(t_t, t_t.T, λt) # -2 high frequency slope
+    elif model=="matern32":
+        Cov_t = cov.matern32(t_t, t_t.T, λt) # -4 high frequency slope
+        
+    # Input data points
+    td = (np.arange(0,Nt)[:,None]-1/2)*dt
+    
+    return Cov_t, td, Nt
+
+
 
 
 # ------------------------------------- synthetic field generation --------------------------------------
