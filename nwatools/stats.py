@@ -22,6 +22,10 @@ import xrft
 
 day = 86400
 
+# colors drifters/moorings
+c_dr = "#377eb8"
+c_mo = "#ff7f00"
+
 # ------------------------------------- covariances ------------------------------------------
 
 # https://en.wikipedia.org/wiki/Mat%C3%A9rn_covariance_function
@@ -95,11 +99,11 @@ def get_cov_1D(cov_x, cov_t):
     if cov_x == "matern12_xy":
         Cx = cov.matern12  # -2 spectral slope
         Cy = cov.matern12  # -2 spectral slope
-        C = (Cx, Cy)
+        C = (Cx, Cy, None)
     elif cov_x == "matern32_xy":
         Cx = cov.matern32  # -4 spectral slope: not twice differentiable
         Cy = cov.matern32  # -4 spectral slope: 
-        C = (Cx, Cy)
+        C = (Cx, Cy, None)
     elif cov_x == "matern2_xy":
         #Cov_x = cov.matern_general(np.abs(t_x - t_x.T), 1., 2, λx) # -5 spectral slope
         #Cov_y = cov.matern_general(np.abs(t_y - t_y.T), 1., 2, λy) # -5 spectral slope
@@ -107,7 +111,7 @@ def get_cov_1D(cov_x, cov_t):
     elif cov_x == "matern52_xy":
         Cx = cov.matern52  # -6 spectral slope
         Cy = cov.matern52  # -6 spectral slope
-        C = (Cx, Cy)
+        C = (Cx, Cy, None)
     elif cov_x == "expquad":
         #jitter = -10
         #Cx = cov.expquad(t_x, t_x.T, λx) # + 1e-10 * np.eye(Nx)
@@ -246,14 +250,13 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     _d = np.sqrt( _x**2 + _y**2 )
     #
     C = np.ones((2*n,2*n))
-    # test comment out
+    #
+    C = np.ones((2*n,2*n))
     C[:n,:n] *= Cu(_x, _y, _d, ld)
-    #C[:n,n:] = C[:n,:n] # dev
-    #C[n:,:n] = C[:n,:n] # dev
-    #C[n:,n:] = C[:n,:n] # dev
+    C[n:,n:] *= Cv(_x, _y, _d, ld)
+    assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
     C[:n,n:] *= Cuv(_x, _y, _d, ld)
     C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
-    C[n:,n:] *= Cv(_x, _y, _d, ld)
     #
     #_Cu  = Cu(_x, _y, _d, ld)
     #_Cv  = Cv(_x, _y, _d, ld)
@@ -289,9 +292,10 @@ def kernel_3d_iso_uv_traj(x, xpr, params, C):
     #
     C = np.ones((2*n,2*n))
     C[:n,:n] *= Cu(_x, _y, _d, ld)
+    C[n:,n:] *= Cv(_x, _y, _d, ld)
+    assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change"
     C[:n,n:] *= Cuv(_x, _y, _d, ld)
     C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
-    C[n:,n:] *= Cv(_x, _y, _d, ld)
     #
     C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
     # decorrelate different trajectories (moorings/drifters)
@@ -406,13 +410,74 @@ def kernel_1d(x, xpr, params, C):
     
     return C
 
-def generate_covariances(model, N, d, λ):
-    """ Generate spatial and temporal covariances
+def kernel_1d_uv(x, xpr, params, C):
+    """
+    temporal kernel only, two velocity components
     
+    Inputs:
+        x: matrices input points [N,3]
+        xpr: matrices output points [M,3]
+        params: tuple length 3
+            eta: standard deviation
+            lt: t length scale
+            
+    """
+    u, lt = params
+    Ct = C
+    
+    # Build the covariance matrix
+    n = x.shape[0]//2
+    #
+    C = np.ones((2*n,2*n))
+    C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
+    # decorrelates u/v components
+    C[:n,n:] *= 0
+    C[n:,:n] *= 0
+    #
+    C *= u**2
+    
+    return C
+
+def kernel_1d_uv_traj(x, xpr, params, C):
+    """
+    temporal kernel only, two velocity components
+    decorrelate data with different id
+    
+    Inputs:
+        x: matrices input points [N,3]
+        xpr: matrices output points [M,3]
+        params: tuple length 3
+            eta: standard deviation
+            ld: spatial scale
+            lt: t length scale
+            
+    """
+    u, lt = params
+    Ct = C
+    
+    # Build the covariance matrix
+    n = x.shape[0]//2
+    #
+    C = np.ones((2*n,2*n))
+    C *= Ct(x[:,2,None], xpr.T[:,2,None].T, lt)
+    # decorrelates u/v components
+    C[:n,n:] *= 0
+    C[n:,:n] *= 0
+    # decorrelate different trajectories (moorings/drifters)
+    C *= ( (x[:,3,None] - xpr.T[:,3,None].T)==0 ).astype(int)
+    #
+    C *= u**2
+    
+    return C
+
+def generate_covariances(model, N, d, λ, xchunks=None):
+    """ Generate spatial and temporal covariances
+    used for synthetic flow generation (via streamfunction/potential)
     """
     
     Cs, Xs, Ns, isotropy = generate_spatial_covariances(
         model[0], N[0], N[1], d[0], d[1], λ[0], λ[1],
+        chunks=xchunks,
     )
 
     Ct, Xt, Nt = generate_temporal_covariance(
@@ -429,7 +494,10 @@ def generate_covariances(model, N, d, λ):
     return C, X, N, isotropy
         
         
-def generate_spatial_covariances(model, Nx, Ny, dx, dy, λx, λy):
+def generate_spatial_covariances(
+    model, Nx, Ny, dx, dy, λx, λy,
+    chunks=None,
+):
     """ Generate spatial covariances"""
             
     print(f"Space covariance model: {model}")
@@ -437,6 +505,10 @@ def generate_spatial_covariances(model, Nx, Ny, dx, dy, λx, λy):
     N = (Nx, Ny)
     t_x = np.arange(Nx)[:, None]*dx
     t_y = np.arange(Ny)[:, None]*dy
+
+    if chunks is not None:
+        t_x = da.from_array(t_x, chunks=(chunks[0],1))
+        t_y = da.from_array(t_y, chunks=(chunks[1],1))
 
     # space
     Cov_x, Cov_y, Cov_d = (None,)*3
@@ -462,7 +534,7 @@ def generate_spatial_covariances(model, Nx, Ny, dx, dy, λx, λy):
         #    - on second derivative: np.sqrt(jitter) * (λx/dx)**2
         # with jitter = -10, λx/dx=100, these signatures are respectively: 1e-3 and 1e-1
 
-    C = (Cov_x, Cov_y, Cov_t)
+    C = (Cov_x, Cov_y)
 
     # for covariances based on horizontal distances
     isotropy = ("iso" in model)
@@ -472,10 +544,10 @@ def generate_spatial_covariances(model, Nx, Ny, dx, dy, λx, λy):
         t_xy = np.sqrt( (t_x2 - t_x2.T)**2 + (t_y2 - t_y2.T)**2 )        
         if model == "matern2_iso":
             Cov_d = cov.matern_general(t_xy, 1., 2, λx) # -5 spectral slope
-            C = (Cov_d, Cov_t)
+            C = Cov_d
         elif model == "matern32_iso":
             Cov_d = cov.matern32(t_xy, 0., λx) # -4 spectral slope
-            C = (Cov_d, Cov_t)
+            C = Cov_d
         else:
             assert False, model+" is not implemented"
         
@@ -509,7 +581,13 @@ def generate_temporal_covariance(model, Nt, dt, λt):
 
 # ------------------------------------- synthetic field generation --------------------------------------
 
-def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotropy=False, seed=1234):
+def generate_uv(
+    kind, N, C, X, amplitudes, 
+    noise=0., 
+    dask_time=True, 
+    #time=True, isotropy=False, 
+    seed=1234,
+):
     """ Generate velocity fields
     
     Parameters
@@ -518,15 +596,15 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
         "uv": generates u and v independantly
         "pp": generates psi (streamfunction) and (phi) independantly from which velocities are derived
     N: tuple
-        Grid dimension, e.g.: (Nx, Ny, Nt)
+        Grid dimension, e.g.: (Nx, Ny, Nt), or (Nx, Ny)
     C: tuple
-        Covariance arrays, e.g.: (Cov_x, Cov_y, Cov_t)
+        Covariance arrays, e.g.: (Cov_x, Cov_y, Cov_t) or (Cov_x, Cov_y) or Cov_d
     xyt: tuple
         xd, yd, td coordinates
     amplitudes: tuple
         amplitudes (u/v or psi, phi) as a size two tuple
-    dask: boolean, optional
-        activate dask distribution
+    dask_time: boolean, optional
+        activate dask distribution along time
     time: boolean, optional
         activate generation of time series
     isotropy: boolean, optional
@@ -535,71 +613,105 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
         random number generation seed
     """
     
+    # massage inputs
+    time, isotropy = None, None
+    if len(N)==2:
+        time=False
+        if not isinstance(C, tuple):
+            isotropy=True
+            Cov_x = C
+        else:
+            isotropy=False
+            Cov_x, Cov_y = C
+        xd, yd = X
+        coords = dict(x=("x", xd[:,0]), y=("y", yd[:,0]))
+    else:
+        time=True
+        if len(C)==2:
+            isotropy=True
+            Cov_x, Cov_t = C
+        elif len(C)==3:
+            isotropy=False
+            Cov_x, Cov_y, Cov_t = C
+        xd, yd, td = X
+        dict(x=("x", xd[:,0]), y=("y", yd[:,0]), time=("time", td[:,0]))
+        
+    assert (time is not None) and (isotropy is not None), "input data not consistent with implementation"
+    print(f" time = {time},  isotropy = {isotropy}  ")
+
     # prepare output dataset
-    xd, yd, td = xyt
-    ds = xr.Dataset(
-        coords=dict(x=("x", xd[:,0]), y=("y", yd[:,0]), time=("time", td[:,0])),
-    )
-    ds["time"].attrs["units"] = "days"
+    ds = xr.Dataset(coords=coords)
     ds["x"].attrs["units"] = "km"
     ds["y"].attrs["units"] = "km"
-    if not time:
-        ds = ds.drop("time")
-        
+    if time:
+        ds["time"].attrs["units"] = "days"
+
     # perform Cholesky decompositions
-    if isotropy:
-        Cov_x, Cov_t = C
-    else:
-        Cov_x, Cov_y, Cov_t = C
-    Lx = np.linalg.cholesky(Cov_x)
-    Lt = np.linalg.cholesky(Cov_t)
+    if isinstance(Cov_x, np.ndarray):
+        chol = np.linalg.cholesky
+        dask_space = False
+    elif isinstance(Cov_x, da.core.Array):
+        chol = lambda x: da.linalg.cholesky(x, lower=True)
+        dask_space = True
+    Lx = chol(Cov_x)
     if not isotropy:
-        Ly = np.linalg.cholesky(Cov_y)
+        Ly = chol(Cov_y)
     # start converting to dask arrays
-    t_chunk = 5
-    #Lt_dask = da.from_array(Lt).persist()
-    if dask:
-        Lx = da.from_array(Lx, chunks=(-1, -1))
-        Lt = da.from_array(Lt, chunks=(t_chunk, -1)).persist()
+    if time:
+        Lt = np.linalg.cholesky(Cov_t)
+        #Lt_dask = da.from_array(Lt).persist()
+        if dask_time:
+            t_chunk = 5
+            Lx = da.from_array(Lx, chunks=(-1, -1))
+            Lt = da.from_array(Lt, chunks=(t_chunk, -1)).persist()
 
     # generate sample
-    u0_noise, u1_noise = 0., 0.
     rstate = da.random.RandomState(seed)
     np.random.seed(seed)
-    if time and not isotropy:
-        if dask:
-            U0 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-            U1 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-            # noise
-            if noise>0:
-                u0_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-                u1_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-    elif not time and not isotropy:
+    u0_noise, u1_noise = 0., 0.
+    if time and not isotropy and dask_time:
+        U0 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+        U1 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+        if noise>0:
+            u0_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            u1_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+    elif time and not isotropy and not dask_time:
+        assert False, "Not implemented"
+    elif time and isotropy and dask_time:
+        _N = (N[0]*N[1], N[2])
+        U0 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+        U1 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+        if noise>0:
+            u0_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            u1_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+    elif time and isotropy and not dask_time:
+        assert False, "Not implemented"
+    # not time
+    elif not time and not isotropy and dask_space:
+        U0 = rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
+        U1 = rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
+        if noise>0:
+            u0_noise = noise * rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
+            u1_noise = noise * rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
+    elif not time and not isotropy and not dask_space:
         U0 = np.random.normal(0, 1, size=(N[0], N[1]))
         U1 = np.random.normal(0, 1, size=(N[0], N[1]))
-        # noise
         if noise>0:
             u0_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
             u1_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
-    elif time and isotropy:
-        if dask:
-            _N = (N[0]*N[1], N[2])
-            U0 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-            U1 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-            # noise
-            if noise>0:
-                u0_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-                u1_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-    elif not time and isotropy:
+    elif not time and isotropy and dask_space:
+        U0 = rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
+        U1 = rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
+        if noise>0:
+            u0_noise = noise * rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
+            u1_noise = noise * rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
+    elif not time and isotropy and not dask_space:
         U0 = np.random.normal(0, 1, size=(N[0]*N[1],))
         U1 = np.random.normal(0, 1, size=(N[0]*N[1],))
-        # noise
         if noise>0:
             u0_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
             u1_noise = noise * np.random.normal(0, 1, size=(N[0]*N[1],))
     
-    
-    #return Lx, Lt, U0, u0_noise
     # 2D
     #zg = η * Lx @ V @ Lt.T
     # 3D
@@ -665,7 +777,8 @@ def generate_uv(kind, N, C, xyt, amplitudes, noise, dask=True, time=True, isotro
 
 def prepare_inference(
     data_dir, case,
-    uv, no_time, parameter_eta_formulation, traj_decorrelation,
+    uv, no_time, no_space,
+    parameter_eta_formulation, traj_decorrelation,
 ):
 
     # load eulerian flow
@@ -703,6 +816,16 @@ def prepare_inference(
             covfunc = lambda x, xpr, params: kernel_2d_iso_u(x, xpr, params, Cu)
         covparams = [η, λx]
         labels = ['σ','η','λx',]
+    elif no_space:
+        if uv:
+            if traj_decorrelation:
+                covfunc = lambda x, xpr, params: kernel_1d_uv_traj(x, xpr, params, Ct)
+            else:
+                covfunc = lambda x, xpr, params: kernel_1d_uv(x, xpr, params, Ct)
+        else:
+            assert False, "not implemented"
+        covparams = [U, λt]
+        labels = ['σ','u','λt']
     elif isotropy:
         if uv:
             if parameter_eta_formulation:
@@ -711,7 +834,7 @@ def prepare_inference(
                 labels = ['σ','η','λx','λt']
             else:
                 def covfunc(x, xpr, params):
-                    # params contains (nu=eta/ld, ld, lt) and needs to be converted to (eta, ld, lt)
+                    # params contains (gamma=eta/ld, ld, lt) and needs to be converted to (eta, ld, lt)
                     params = (params[0]*params[1], *params[1:])
                     if traj_decorrelation:
                         return kernel_3d_iso_uv_traj(x, xpr, params, (Cu, Cv, Cuv, Ct))
@@ -811,6 +934,7 @@ def inference_MH(
     n_mcmc = 20_000,
     steps = (1/5, 1/5, 1/5, 1/2),
     tqdm_disable=False,
+    no_time=False, no_space=False,
     **kwargs,
 ):
     
@@ -851,10 +975,21 @@ def inference_MH(
     for i in tqdm(np.arange(1, n_mcmc), disable=tqdm_disable):
 
         eta_proposed = np.random.normal(eta_samples[i-1], step_sizes[0], 1)
+        #
         ld_proposed = np.random.normal(ld_samples[i-1], step_sizes[1], 1)
+        if no_space:
+            # ld is kept constant
+            ld_proposed[:] = ld_samples[i-1]
+        #
         lt_proposed = np.random.normal(lt_samples[i-1], step_sizes[2], 1)
+        if no_time:
+            # lt is kept constant
+            lt_proposed[:] = lt_samples[i-1]
+        #
         noise_proposed = np.random.normal(noise_samples[i-1], step_sizes[3], 1)
 
+        #print(eta_proposed, ld_proposed, 
+        #      lt_proposed, noise_proposed)
         proposed = np.array([eta_proposed, ld_proposed, 
                              lt_proposed, noise_proposed])
 
@@ -961,7 +1096,7 @@ def select_traj(*args, repeats=5):
 def mooring_inference(
     dsf, seed,
     covparams, covfunc, labels, N, noise,
-    inference="MH", uv=True, no_time=False,
+    inference="MH", uv=True,
     flow_scale=None, dx=None,
     write=None, overwrite=True,
     **kwargs,
@@ -993,22 +1128,14 @@ def mooring_inference(
     ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
 
     # set up inference
-    if no_time:
-        u, v, x, y = xr.broadcast(ds.U, ds.V, ds.x, ds.y)
-        assert u.shape==v.shape==x.shape==y.shape
-        x = x.values.ravel()
-        y = y.values.ravel()
-        X = np.hstack([x[:,None], y[:,None],])
-    else:
-        #u, v, x, y, t = xr.broadcast(ds.U, ds.V, ds.x, ds.y, ds.time)
-        u, v, x, y, t, traj = xr.broadcast(ds.U, ds.V, ds.x, ds.y, ds.time, ds.traj)
-        assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
-        x = x.values.ravel()
-        y = y.values.ravel()
-        t = t.values.ravel()
-        traj = traj.values.ravel()
-        #X = np.hstack([x[:,None], y[:,None], t[:,None]])
-        X = np.hstack([x[:,None], y[:,None], t[:,None], traj[:,None]])
+    u, v, x, y, t, traj = xr.broadcast(ds.U, ds.V, ds.x, ds.y, ds.time, ds.traj)
+    assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
+    x = x.values.ravel()
+    y = y.values.ravel()
+    t = t.values.ravel()
+    traj = traj.values.ravel()
+    #X = np.hstack([x[:,None], y[:,None], t[:,None]])
+    X = np.hstack([x[:,None], y[:,None], t[:,None], traj[:,None]])
     u = u.values.ravel()[:, None]
     v = v.values.ravel()[:, None]
     if flow_scale is not None:
@@ -1033,13 +1160,11 @@ def mooring_inference(
     if inference=="MH":
         ds = inference_MH(
             X, U, noise, covparams, covfunc, labels, 
-            no_time=no_time, 
             **kwargs,
         )
     elif inference=="emcee":
         ds = inference_emcee(
             X, U, noise, covparams, covfunc, labels, 
-            no_time=no_time, 
             **kwargs,
         )
     ds["true_parameters"] = ("parameter", np.array([noise]+covparams))
@@ -1441,7 +1566,159 @@ def traceplots(ds, MAP=True, burn=None):
     ax.set_ylabel("")
     ax.set_title("log_prob")
 
+# combined plot of inference performance
+def plot_sensitivity_combined(
+    dsm, dsr, MAP=True, 
+    x=None, xlog2=False, x_width=0.2, x_off=0., x_scale=1., x_ticks_free=True,
+    alpha=None, c=None,
+    bounds=None,
+    label=None,
+    type="shading",
+):
 
+    fig, axes = plt.subplot_mosaic(
+        [['(a)', '(b)', '(c)', '(d)']],
+        layout='constrained',
+        figsize=(10,3),
+        dpi=300,
+    )
+
+    b0, b1 = None, None
+
+    # x positions
+    _x = dsm[x].values
+    if xlog2:
+        width = lambda p, w: inverse2(forward2(p)+w/2)-inverse2(forward2(p)-w/2)
+        widths = width(_x, x_width) # 0.2
+        x_scale = 1.2
+    else:
+        widths = x_width
+    # other properties
+    boxkwargs = dict(
+        manage_ticks=False,
+        showfliers=False,
+        widths=widths, # 1
+        patch_artist=True,
+        medianprops=dict(color="k", lw=2),
+    )
+    
+    # moorings
+    ds = dsm
+    if c is None:
+        c = c_mo
+    for p, k in zip(ds.parameter.values, axes):
+        ax = axes[k]
+        if MAP:
+            da = ds["MAP"].sel(parameter=p)
+        else:
+            da = (ds["samples"]
+                .sel(parameter=p)
+                .isel(i=slice(burn,None))
+                .mean("i")
+            )
+        if type=="boxplot":
+            _h = _boxplot(ax, da.values.T, da[x].values, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs)
+        elif type=="shading":
+            _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha)
+        if b0 is None:
+            b0 = _h
+
+    # drifters
+    if dsr is not None:
+        ds, c = dsr, c_dr
+        
+        for p, k in zip(ds.parameter.values, axes):
+            ax = axes[k]
+            
+            if MAP:
+                da = ds["MAP"].sel(parameter=p)
+            else:
+                da = (ds["samples"]
+                    .sel(parameter=p)
+                    .isel(i=slice(burn,None))
+                    .mean("i")
+                )
+            if type=="boxplot":
+                _h = _boxplot(ax, da.values.T, da[x].values*x_scale+x_off, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs)
+            elif type=="shading":
+                _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha)
+            if b1 is None:
+                b1 = _h
+
+    # misc info
+    for p, k in zip(ds.parameter.values, axes):
+        ax = axes[k]
+        if MAP:
+            da = ds["MAP"].sel(parameter=p)
+        else:
+            da = (ds["samples"]
+                .sel(parameter=p)
+                .isel(i=slice(burn,None))
+                .mean("i")
+            )
+        if xlog2:
+            ax.set_xscale('function', functions=(forward2,inverse2))
+
+        # truth
+        h_truth = ax.scatter(da[x].values, da["true_parameters"]+da[x]*0, 
+                   c="deeppink", edgecolors="k", s=80, marker="*", label="truth", zorder=10)
+
+        ax.set_title(p)
+        ax.set_xlabel(x)
+        if not x_ticks_free:
+            ax.set_xticks(_x)
+        if ax==axes["(a)"]:
+            #ax.legend()
+            if dsr is not None:
+                ax.legend([b0, b1, h_truth], ['moorings', 'drifters', 'truth'], loc='upper right')
+            else:
+                ax.legend([b0, b1], [label, 'truth'], loc='upper right')
+
+        if bounds is not None:
+            ax.set_ylim(bounds[p])
+        add_parameter_bounds(ds.sel(parameter=p), ax)
+        ax.grid()
+    
+    return fig, axes
+
+# log2 x scaling
+# https://stackoverflow.com/questions/65319997/how-to-set-the-tick-scale-as-the-power-of-2-in-matplotlib
+def forward2(x):
+    return np.log2(x)
+def inverse2(x):
+    return 2**x
+
+def _boxplot(ax, da, positions, **kwargs):
+    bplot = ax.boxplot(
+        da, 
+        positions=positions, 
+        **kwargs,
+    )
+    if b0 is None:
+        b0 = bplot["boxes"][0]
+    return bplot["boxes"][0]
+
+def _shadeplot(ax, da, positions, **kwargs):
+    q0, qm, q1 = 1/4, 1/2, 3/4
+    daq = da.quantile([q0, qm, q1], "ensemble")
+    _kwargs = dict(**kwargs)
+    _kwargs["alpha"] = 1
+    ax.plot(positions, daq.sel(quantile=qm), **_kwargs)
+    h = ax.fill_between(positions, daq.sel(quantile=q0), daq.sel(quantile=q1), **kwargs)
+    return h
+    
+from matplotlib.patches import Rectangle
+
+def add_parameter_bounds(ds, ax):
+    """ add bounds as grey patches """
+    lower = float(ds.lower.min())
+    upper = float(ds.upper.max())
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    rect = Rectangle((x0,lower), x1-x0, lower-100, facecolor="0.5", zorder=0, alpha=0.5)
+    ax.add_patch(rect)
+    rect = Rectangle((x0,upper), x1-x0, upper+100, facecolor="0.5", zorder=0, alpha=0.5)
+    ax.add_patch(rect)
 
 def label_and_print(fig, axs, fig_name):
     """ add labels on figures and print into files """

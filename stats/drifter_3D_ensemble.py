@@ -27,11 +27,16 @@ U = "0.1"
 case = "3D_matern32_iso_matern12_pp_r0.0_u"+U
 
 uv = True # True if u and v are observed
-parameter_eta_formulation = False # eta vs nu formulation
+parameter_eta_formulation = False # eta vs gamma formulation
 noise = 0.01 # observation noise added to u/v
 no_time = False # activates time inference
+no_space = False # activates time inference
 traj_decorrelation = False  # artificially decorrelate different moorings/drifters
 #traj_decorrelation = True  # artificially decorrelate different moorings/drifters
+if no_space:
+    # makes little sense otherwise
+    traj_decorrelation = True
+assert not no_time, "need to implement decorrelation across time"
 
 # number of points used for inference#
 #Nxy, Nt = 1, 50
@@ -68,7 +73,8 @@ def run():
 
     dsf, covfunc, covparams, labels = st.prepare_inference(
         data_dir, case,
-        uv, no_time, parameter_eta_formulation, traj_decorrelation,
+        uv, no_time, no_space,
+        parameter_eta_formulation, traj_decorrelation,
     )
 
     # ---
@@ -89,7 +95,10 @@ def run():
             nc = nc.replace(".nc", f"_trajd.nc")
 
         if prod and not os.path.isfile(nc):
-            ds = st.run_mooring_ensembles(Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx) 
+            ds = st.run_mooring_ensembles(
+                Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
+                no_time=no_time, no_space=no_space,                
+            ) 
             ds.to_netcdf(nc, mode="w")
         else:
             logging.info(" ... skipping")
@@ -129,7 +138,10 @@ def run():
             nc = nc.replace(".nc", f"_trajd.nc")
 
         if prod and not os.path.isfile(nc):
-            ds = st.run_drifter_ensembles(data_dir, case, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx) 
+            ds = st.run_drifter_ensembles(
+                data_dir, case, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
+                no_time=no_time, no_space=no_space,
+            ) 
             ds.to_netcdf(nc, mode="w")
         else:
             logging.info(" ... skipping")
