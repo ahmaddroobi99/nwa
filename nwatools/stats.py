@@ -10,6 +10,7 @@ import dask.array as da
 
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
+from seaborn import color_palette
 
 from scipy.special import kv, kvp, gamma
 from gptide import cov
@@ -23,8 +24,18 @@ import xrft
 day = 86400
 
 # colors drifters/moorings
-c_dr = "#377eb8"
-c_mo = "#ff7f00"
+cpal = color_palette("colorblind")
+colors = dict(
+    mo = cpal[0],
+    #mo = "#ff7f00",
+    dr = cpal[1],
+    #dr = "#377eb8",
+    truth = "k",
+    #truth = "deeppink",
+    #truth = cpal[2],
+    MAP = cpal[2],
+)
+
 
 # ------------------------------------- covariances ------------------------------------------
 
@@ -38,8 +49,9 @@ def matern_general(dx, eta, nu, l):
     K = np.power(eta, 2.) * np.power(2., 1-nu) / gamma(nu)
     K *= np.power(cff1, nu)
     K *= kv(nu, cff1)
-    
-    K[np.isnan(K)] = np.power(eta, 2.)
+
+    if isinstance(K, np.ndarray):
+        K[np.isnan(K)] = np.power(eta, 2.)
     
     return K
 
@@ -254,7 +266,7 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     C = np.ones((2*n,2*n))
     C[:n,:n] *= Cu(_x, _y, _d, ld)
     C[n:,n:] *= Cv(_x, _y, _d, ld)
-    assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
+    #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
     C[:n,n:] *= Cuv(_x, _y, _d, ld)
     C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
     #
@@ -417,8 +429,8 @@ def kernel_1d_uv(x, xpr, params, C):
     Inputs:
         x: matrices input points [N,3]
         xpr: matrices output points [M,3]
-        params: tuple length 3
-            eta: standard deviation
+        params: tuple length 2
+            u: standard deviation
             lt: t length scale
             
     """
@@ -444,11 +456,10 @@ def kernel_1d_uv_traj(x, xpr, params, C):
     decorrelate data with different id
     
     Inputs:
-        x: matrices input points [N,3]
-        xpr: matrices output points [M,3]
-        params: tuple length 3
-            eta: standard deviation
-            ld: spatial scale
+        x: matrices input points [N,4]
+        xpr: matrices output points [M,4]
+        params: tuple length 2
+            u: standard deviation
             lt: t length scale
             
     """
@@ -772,12 +783,18 @@ def generate_uv(
 
     return ds
 
+#
+def amplitude_decifit(dx, λ, ν):
+    """ scale of the rms deficit associted after second order differenciation  """
+    S2 = λ**2*(ν-1)/ν * (1 - matern_general(2*dx, 1., ν, λ))/2/dx**2
+    return np.sqrt(S2)
+
 
 # ------------------------------------- inference -----------------------------------------
 
 def prepare_inference(
     data_dir, case,
-    uv, no_time, no_space,
+    uv, no_time, no_space, 
     parameter_eta_formulation, traj_decorrelation,
 ):
 
@@ -785,12 +802,10 @@ def prepare_inference(
     flow_file = os.path.join(data_dir, case+"_flow.zarr")
     dsf = xr.open_dataset(os.path.join(data_dir, flow_file))
     dsf["time"] = dsf["time"]/pd.Timedelta("1D")
-    U = dsf.attrs["U"] # useful for computation of alpha much latter
-
+    U = dsf.attrs["U"] # useful for computation of alpha much latter        
+    
     # problem parameters (need to be consistent with data generation notebook)
     p = dsf.attrs
-    for k, v in p.items():
-        print(k, v)
     η = p["eta"]  # streamfunction amplitude
     #
     λx = p["lambda_x"]   # km
@@ -800,14 +815,35 @@ def prepare_inference(
     # derived velocity parameter
     γ = η / λx 
 
+    # add grid information
     #Lx = float(dsf.x.max()-dsf.x.min())
     #Ly = float(dsf.y.max()-dsf.y.min())
+    p["dx"] = float(dsf.x.diff("x").median())
+    p["dy"] = float(dsf.y.diff("y").median())
     # km, km this should not matter
 
     # get 1D covariances
     C, Ct, isotropy = get_cov_1D(p["cov_x"], p["cov_t"])
     Cu, Cv, Cuv = C
+    if "matern32" in p["cov_x"]:
+        p["nu_space"] = 3/2
+    else:
+        assert False, "no nu could be infered"
+    if "matern12" in p["cov_t"]:
+        p["nu_time"] = 1/2
+    else:
+        assert False, "no nu could be infered"
 
+    # correct for bias due to spatial differentiation and (psi to U)
+    _scale = amplitude_decifit(p["dx"], p["lambda_x"], p["nu_space"])
+    #η *= _scale
+    #γ *= _scale
+    #p["eta"] = η
+    p["amplitude_deficit"] = _scale
+
+    for k, v in p.items():
+        print(k, v)
+    
     # set covariance parameters
     if no_time:
         if uv:
@@ -932,72 +968,54 @@ def inference_MH(
     noise, covparams,
     covfunc, labels,
     n_mcmc = 20_000,
-    steps = (1/5, 1/5, 1/5, 1/2),
+    steps = None,
     tqdm_disable=False,
     no_time=False, no_space=False,
     **kwargs,
 ):
-    
-    η, λx, λt = covparams
 
+    # number of parameters infered
+    N = len(labels)
+
+    # default step sizes
+    if steps is None:
+        # ** isn't this too coarse ? **
+        steps = [1/5]*(N-1) + [1/2]
+    
     # The order of everything is eta, ld, lt, noise
     #step_sizes = np.array([.5, 5, .5, 0.005])
     #initialisations = np.array([12, 100, 5, 0.01])
+    initialisations = np.array(covparams+[noise])
     step_sizes = np.array(
-        [v*s for v, s in zip([η, λx, λt, noise], steps)]
+        [v*s for v, s in zip(initialisations, steps)]
     )
-    initialisations = np.array([η, λx, λt, noise])
-    lowers = np.repeat(0, 4)
-    #uppers = np.array([100, 1000, 100, 0.05])
-    uppers = np.array([η*10, λx*10, λt*10, noise*10])
+    lowers = np.repeat(0, N)
+    uppers = initialisations * 10
 
     # setup objects
-    eta_samples = np.empty(n_mcmc)
-    ld_samples = np.empty(n_mcmc)
-    lt_samples = np.empty(n_mcmc)
-    noise_samples = np.empty(n_mcmc)
+    samples = [np.empty(n_mcmc) for _ in range(N)]
     accept_samples = np.empty(n_mcmc)
     lp_samples = np.empty(n_mcmc)
     lp_samples[:] = np.nan
-
-    eta_samples[0] = initialisations[0]
-    ld_samples[0] = initialisations[1]
-    lt_samples[0] = initialisations[2]
-    noise_samples[0] = initialisations[3]
+    # init samples
+    for i, s in enumerate(samples):
+        s[0] =  initialisations[i]
     accept_samples[0] = 0
-
-    #covparams_curr = initialisations.copy()[0:3]
-    covparams_prop = initialisations.copy()[0:3]    
-
+    #
+    covparams_prop = initialisations.copy()[0:N-1]
     # run mcmc
     gp_current = GPtideScipy(X, X, noise, covfunc, covparams)
 
     for i in tqdm(np.arange(1, n_mcmc), disable=tqdm_disable):
-
-        eta_proposed = np.random.normal(eta_samples[i-1], step_sizes[0], 1)
-        #
-        ld_proposed = np.random.normal(ld_samples[i-1], step_sizes[1], 1)
-        if no_space:
-            # ld is kept constant
-            ld_proposed[:] = ld_samples[i-1]
-        #
-        lt_proposed = np.random.normal(lt_samples[i-1], step_sizes[2], 1)
-        if no_time:
-            # lt is kept constant
-            lt_proposed[:] = lt_samples[i-1]
-        #
-        noise_proposed = np.random.normal(noise_samples[i-1], step_sizes[3], 1)
-
-        #print(eta_proposed, ld_proposed, 
-        #      lt_proposed, noise_proposed)
-        proposed = np.array([eta_proposed, ld_proposed, 
-                             lt_proposed, noise_proposed])
+        
+        proposed = np.array([
+            np.random.normal(s[i-1], step, 1)
+            for s, step in zip(samples, step_sizes)
+        ])
 
         if ((proposed.T <= lowers) | (proposed.T >= uppers)).any():
-            eta_samples[i] = eta_samples[i-1]
-            ld_samples[i] = ld_samples[i-1]
-            lt_samples[i] = lt_samples[i-1]
-            noise_samples[i] = noise_samples[i-1]
+            for s in samples:
+                s[i] = s[i-1]
             lp_samples[i] = lp_samples[i-1]
             accept_samples[i] = 0
             continue
@@ -1005,8 +1023,8 @@ def inference_MH(
         if accept_samples[i-1] == True:
             gp_current = gp_proposed
 
-        covparams_prop = np.array([eta_proposed, ld_proposed, lt_proposed])
-        gp_proposed = GPtideScipy(X, X, noise_proposed, covfunc, covparams_prop)
+        covparams_prop = proposed[:-1]
+        gp_proposed = GPtideScipy(X, X, proposed[-1], covfunc, covparams_prop)
 
         lp_current = gp_current.log_marg_likelihood(U)
         lp_proposed = gp_proposed.log_marg_likelihood(U)
@@ -1015,23 +1033,17 @@ def inference_MH(
         u = np.random.uniform()
 
         if alpha > u:
-            eta_samples[i] = eta_proposed
-            ld_samples[i] = ld_proposed
-            lt_samples[i] = lt_proposed
-            noise_samples[i] = noise_proposed
+            for s, p in zip(samples, proposed):
+                s[i] = p
             accept_samples[i] = 1
             lp_samples[i] = lp_proposed
         else:
-            eta_samples[i] = eta_samples[i-1]
-            ld_samples[i] = ld_samples[i-1]
-            lt_samples[i] = lt_samples[i-1]
-            noise_samples[i] = noise_samples[i-1]
+            for s, p in zip(samples, proposed):
+                s[i] = s[i-1]
             accept_samples[i] = 0
             lp_samples[i] = lp_samples[i-1]
 
-    #print(np.mean(accept_samples))
-
-    samples = np.vstack((noise_samples, eta_samples, ld_samples, lt_samples))
+    samples = np.vstack([samples[-1]]+samples[:-1])
     ds = xr.Dataset(
         dict(
             samples=(("i", "parameter"), samples.T), 
@@ -1281,6 +1293,7 @@ def drifter_inference(
 
     # massage inputs to inference problem
     if no_time:
+        # this should not be necessary
         u, v, x, y = xr.broadcast(ds.u, ds.v, ds.x, ds.y)
         assert u.shape==v.shape==x.shape==y.shape
         x = x.values.ravel()
@@ -1574,8 +1587,17 @@ def plot_sensitivity_combined(
     bounds=None,
     label=None,
     type="shading",
+    dx_deficit_correction=10,
 ):
 
+    if dx_deficit_correction is not None:
+        # dx_deficit_correction is dx i.e. the original flow grid spacing
+        lambda_x = dsm.attrs["lambda_x"]
+        if "matern32" in dsm.attrs["cov_x"]:
+            nu = 3/2
+        else:
+            assert False, "not recognizing nu in cov_x"
+    
     fig, axes = plt.subplot_mosaic(
         [['(a)', '(b)', '(c)', '(d)']],
         layout='constrained',
@@ -1605,7 +1627,7 @@ def plot_sensitivity_combined(
     # moorings
     ds = dsm
     if c is None:
-        c = c_mo
+        c = colors["mo"]
     for p, k in zip(ds.parameter.values, axes):
         ax = axes[k]
         if MAP:
@@ -1625,7 +1647,7 @@ def plot_sensitivity_combined(
 
     # drifters
     if dsr is not None:
-        ds, c = dsr, c_dr
+        ds, c = dsr, colors["dr"]
         
         for p, k in zip(ds.parameter.values, axes):
             ax = axes[k]
@@ -1660,8 +1682,24 @@ def plot_sensitivity_combined(
             ax.set_xscale('function', functions=(forward2,inverse2))
 
         # truth
-        h_truth = ax.scatter(da[x].values, da["true_parameters"]+da[x]*0, 
-                   c="deeppink", edgecolors="k", s=80, marker="*", label="truth", zorder=10)
+        if (p=="γ" or p=="η") and dx_deficit_correction is not None:
+            _s = amplitude_decifit(dx_deficit_correction, lambda_x, nu)
+            #_s = 1 # tmp dev
+        else:
+            _s = 1.
+        truth = da["true_parameters"]*_s+da[x]*0
+        if type=="boxplot":
+            h_truth = ax.scatter(
+                da[x].values, truth , 
+                c=colors["truth"], edgecolors="k", 
+                s=80, marker="*", label="truth", zorder=10,
+            )
+        elif type=="shading":
+            h_truth = ax.plot(
+                da[x].values, truth, 
+                color=colors["truth"], lw=2, 
+                label="truth", zorder=10,
+            )
 
         ax.set_title(p)
         ax.set_xlabel(x)
@@ -1694,8 +1732,6 @@ def _boxplot(ax, da, positions, **kwargs):
         positions=positions, 
         **kwargs,
     )
-    if b0 is None:
-        b0 = bplot["boxes"][0]
     return bplot["boxes"][0]
 
 def _shadeplot(ax, da, positions, **kwargs):
