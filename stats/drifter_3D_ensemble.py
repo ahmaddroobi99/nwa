@@ -18,13 +18,11 @@ day = 86400
 #data_dir = "/home1/scratch/aponte/"
 data_dir = "/home/datawork-lops-osi/aponte/nwa/drifter_stats"
 
-# actually run production inferences
-prod=True
-#prod=False
-
 # flow case
 U = "0.1"
 case = "3D_matern32_iso_matern12_pp_r0.0_u"+U
+#case = "3D_matern52_iso_matern12_pp_r0.0_u"+U
+run_dir = os.path.join(data_dir, case)
 
 uv = True # True if u and v are observed
 parameter_eta_formulation = False # eta vs gamma formulation
@@ -32,50 +30,59 @@ noise = 0.01 # observation noise added to u/v
 no_time = False # activates time inference
 no_space = False # activates time inference
 traj_decorrelation = False  # artificially decorrelate different moorings/drifters
-#traj_decorrelation = True  # artificially decorrelate different moorings/drifters
+
+# number of points used for inference#
+Nxy, Nt = 8, 50
+
+# run multiple Nxy at once
+#Nxy = [1, 2, 4, 8, 16]
+#Nxy = [2, 4, 8, 16]
+
+# size of the experiment ensemble
+#Ne = 10 # dev
+Ne = 100
+
+dx = None
+#dx = 100. # Nxy>1, separation between platforms
+
+experiment = 2
+if experiment==0:
+    # ensemble run
+    Nxy = [1, 2, 4, 8, 16]
+elif experiment==1:
+    traj_decorrelation = True
+    Nxy = [1, 2, 4, 8, 16]
+elif experiment==2:
+    # dx sensitivity run
+    Nxy, Nt = 2, 50
+    #dx = [5, 10, 20, 30, 40, 50, 60, 80, 100, 125, 150, 175, 200, 300]  # 5 does not go through with 10% tolerance on distance
+    dx = [10, 20, 30, 40, 50, 60, 80, 100, 125, 150, 175, 200, 300]
+
 if no_space:
     # makes little sense otherwise
     traj_decorrelation = True
 assert not no_time, "need to implement decorrelation across time"
 
-# number of points used for inference#
-#Nxy, Nt = 1, 50
-#Nxy, Nt = 2, 50
-Nxy, Nt = 4, 50
-#Nxy, Nt = 8, 50
-#Nxy, Nt = 16, 50
-#Nxy, Nt = 5, 50
-#Nxy, Nt = 10, 50
-
-# run multiple Nxy at once
-Nxy = [1, 2, 4, 8, 16]
-Nxy = [2, 4, 8, 16]
-
-# number of ensembles
-#Ne = 10 # dev
-Ne = 100 # prod
-
-dx = None
-#dx = 100. # Nxy>1, separation between platforms
-#dx = [20, 50, 100, 150, 200]
-
 # dask parameters
-dask_jobs = 5  # number of dask pbd jobs
-jobqueuekw = dict(processes=20, cores=20)  # uplet debug
+#dask_jobs = 5  # number of dask pbd jobs
+#jobqueuekw = dict(processes=20, cores=20)
+dask_jobs = 10  # number of dask pbd jobs
+jobqueuekw = dict(processes=10, cores=10, walltime="24:00:00")
 
 # ---------------------------------- main ------------------------------------
 
 def run():
 
-    logging.info("starting run")
+    logging.info(f"starting run: case={case} / experiment={experiment}")
 
     # ### prepare inference & common utils
 
     dsf, covfunc, covparams, labels = st.prepare_inference(
-        data_dir, case,
+        run_dir,
         uv, no_time, no_space,
         parameter_eta_formulation, traj_decorrelation,
     )
+    logging.info("dsf attributes: "+" ;".join([f"{k}/{v}" for k, v in dsf.attrs.items()]))
 
     # ---
     # ## mooring inference
@@ -88,16 +95,17 @@ def run():
             logging.info(f" Nxy= {Nxy} - start")
         
         # build output file name
-        nc = os.path.join(data_dir, case+f"_moorings_ensemble_Nxy{Nxy}.nc")
+        nc = os.path.join(run_dir, f"moorings_ensemble_Nxy{Nxy}.nc")
         if dx is not None:
             nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
         if traj_decorrelation:
             nc = nc.replace(".nc", f"_trajd.nc")
 
-        if prod and not os.path.isfile(nc):
+        # do not overwrite
+        if not os.path.isfile(nc):
             ds = st.run_mooring_ensembles(
                 Ne, dsf, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
-                no_time=no_time, no_space=no_space,                
+                no_time=no_time, no_space=no_space,
             ) 
             ds.to_netcdf(nc, mode="w")
         else:
@@ -131,15 +139,15 @@ def run():
         logging.info(f" Nxy= {Nxy}, dx={dx} - start")
 
         # build output file name    
-        nc = os.path.join(data_dir, case+f"_drifters_ensemble_Nxy{Nxy}.nc")
+        nc = os.path.join(run_dir, f"drifters_ensemble_Nxy{Nxy}.nc")
         if dx is not None:
             nc = nc.replace(".nc", f"_dx{dx:0.0f}.nc")
         if traj_decorrelation:
             nc = nc.replace(".nc", f"_trajd.nc")
 
-        if prod and not os.path.isfile(nc):
+        if not os.path.isfile(nc):
             ds = st.run_drifter_ensembles(
-                data_dir, case, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
+                run_dir, Ne, covparams, covfunc, labels, (Nt, Nxy), noise, dx=dx,
                 no_time=no_time, no_space=no_space,
             ) 
             ds.to_netcdf(nc, mode="w")
@@ -309,6 +317,7 @@ if __name__=="__main__":
         filename="distributed.log",
         level=logging.INFO,
         # level=logging.DEBUG,
+        format='%(asctime)s %(message)s',
     )
     # level order is: DEBUG, INFO, WARNING, ERROR
     # encoding='utf-8', # available only in latests python versions
@@ -320,7 +329,6 @@ if __name__=="__main__":
         "distributed",
         jobs=dask_jobs,
         fraction=0.9,
-        walltime="12:00:00",
         **jobqueuekw,
     )
     ssh_command, dashboard_port = dashboard_ssh_forward(client)

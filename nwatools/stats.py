@@ -55,7 +55,6 @@ def matern_general(dx, eta, nu, l):
     
     return K
 
-# new
 def matern_general_d1(dx, eta, nu, l):
     """General Matern base function, first derivative"""
     
@@ -86,13 +85,13 @@ def matern_general_d2(dx, eta, nu, l):
     
     return K
 
-
+##
 def matern32_d1(dx, eta, l):
     """Matern 3/2 function, first derivative"""
     
     cff0 = np.sqrt(3)/l
     cff1 = cff0*np.abs(dx)
-    Kp = -np.power(eta, 2.)*cff0*cff1*np.exp(-cff1)
+    Kp = -np.power(eta, 2.) * cff0 * cff1 * np.exp(-cff1)
     
     return Kp
 
@@ -101,7 +100,26 @@ def matern32_d2(dx, eta, l):
     
     cff0 = np.sqrt(3)/l
     cff1 = cff0*np.abs(dx)
-    Kpp = np.power(eta, 2.) * cff0**2 *(-1+cff1)*np.exp(-cff1)
+    Kpp = np.power(eta, 2.) * cff0**2 * (-1+cff1) * np.exp(-cff1)
+    
+    return Kpp
+
+##
+def matern52_d1(dx, eta, l):
+    """Matern 5/2 function, first derivative"""
+    
+    cff0 = np.sqrt(5)/l
+    cff1 = cff0*np.abs(dx)
+    Kp = -np.power(eta, 2.) * cff0 * cff1*(1+cff1)/3 * np.exp(-cff1)
+    
+    return Kp
+
+def matern52_d2(dx, eta, l):
+    """Matern 5/2 function, second derivative"""
+    
+    cff0 = np.sqrt(5)/l
+    cff1 = cff0*np.abs(dx)
+    Kpp = np.power(eta, 2.) * cff0**2 * (-1-cff1+cff1*cff1)/3 * np.exp(-cff1)
     
     return Kpp
 
@@ -109,20 +127,21 @@ def get_cov_1D(cov_x, cov_t):
 
     isotropy = False
     if cov_x == "matern12_xy":
-        Cx = cov.matern12  # -2 spectral slope
-        Cy = cov.matern12  # -2 spectral slope
+        Cx = cov.matern12  # -2 spectral slope in 1D
+        Cy = cov.matern12  # -2 spectral slope in 1D
         C = (Cx, Cy, None)
     elif cov_x == "matern32_xy":
-        Cx = cov.matern32  # -4 spectral slope: not twice differentiable
-        Cy = cov.matern32  # -4 spectral slope: 
+        Cx = cov.matern32  # -4 isotropic spectral slope in 2D - not twice differentiable
+        Cy = cov.matern32  # -4 isotropic spectral slope in 2D
         C = (Cx, Cy, None)
     elif cov_x == "matern2_xy":
         #Cov_x = cov.matern_general(np.abs(t_x - t_x.T), 1., 2, λx) # -5 spectral slope
         #Cov_y = cov.matern_general(np.abs(t_y - t_y.T), 1., 2, λy) # -5 spectral slope
+        assert False, "not implemented"
         pass
     elif cov_x == "matern52_xy":
-        Cx = cov.matern52  # -6 spectral slope
-        Cy = cov.matern52  # -6 spectral slope
+        Cx = cov.matern52  # -5 isotropic spectral slope
+        Cy = cov.matern52  # -5 isotropic spectral slope
         C = (Cx, Cy, None)
     elif cov_x == "expquad":
         #jitter = -10
@@ -179,6 +198,30 @@ def get_cov_1D(cov_x, cov_t):
             C = x*y*(
                     matern32_d2(d, 1., λ)
                     - matern32_d1(d, 1., λ) / d
+                ) / d**2
+            C[np.isnan(C)] = 0.
+            return C
+        C = (Cu, Cv, Cuv)
+    elif cov_x == "matern52_iso":
+        # for covariances based on distances
+        def Cu(x, y, d, λ):
+            C = -(
+                y**2 * matern52_d2(d, 1., λ)
+                + x**2 * matern52_d1(d, 1., λ) / d
+            )/ d**2
+            C[np.isnan(C)] = -matern52_d2(d[np.isnan(C)], 1.0, λ)
+            return C
+        def Cv(x, y, d, λ):
+            C = -(
+                x**2 * matern52_d2(d, 1., λ)
+                + y**2 * matern52_d1(d, 1., λ) / d
+            ) / d**2
+            C[np.isnan(C)] = -matern52_d2(d[np.isnan(C)], 1.0, λ)
+            return C
+        def Cuv(x, y, d, λ):
+            C = x*y*(
+                    matern52_d2(d, 1., λ)
+                    - matern52_d1(d, 1., λ) / d
                 ) / d**2
             C[np.isnan(C)] = 0.
             return C
@@ -267,6 +310,7 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     C[:n,:n] *= Cu(_x, _y, _d, ld)
     C[n:,n:] *= Cv(_x, _y, _d, ld)
     #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
+    # it is correct: Cuv = Cuv.T, Cuv is even in terms of x and y
     C[:n,n:] *= Cuv(_x, _y, _d, ld)
     C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
     #
@@ -305,7 +349,7 @@ def kernel_3d_iso_uv_traj(x, xpr, params, C):
     C = np.ones((2*n,2*n))
     C[:n,:n] *= Cu(_x, _y, _d, ld)
     C[n:,n:] *= Cv(_x, _y, _d, ld)
-    assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change"
+    #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change"
     C[:n,n:] *= Cuv(_x, _y, _d, ld)
     C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
     #
@@ -554,10 +598,13 @@ def generate_spatial_covariances(
         t_y2 = (t_x*0 + t_y.T  ).ravel()[:, None]
         t_xy = np.sqrt( (t_x2 - t_x2.T)**2 + (t_y2 - t_y2.T)**2 )        
         if model == "matern2_iso":
-            Cov_d = cov.matern_general(t_xy, 1., 2, λx) # -5 spectral slope
+            Cov_d = cov.matern_general(t_xy, 1., 2, λx)
             C = Cov_d
         elif model == "matern32_iso":
             Cov_d = cov.matern32(t_xy, 0., λx) # -4 spectral slope
+            C = Cov_d
+        elif model == "matern52_iso":
+            Cov_d = cov.matern52(t_xy, 0., λx) # -5 spectral slope
             C = Cov_d
         else:
             assert False, model+" is not implemented"
@@ -596,7 +643,8 @@ def generate_uv(
     kind, N, C, X, amplitudes, 
     noise=0., 
     dask_time=True, 
-    #time=True, isotropy=False, 
+    #time=True, isotropy=False,
+    time_chunk=5,
     seed=1234,
 ):
     """ Generate velocity fields
@@ -645,7 +693,7 @@ def generate_uv(
             isotropy=False
             Cov_x, Cov_y, Cov_t = C
         xd, yd, td = X
-        dict(x=("x", xd[:,0]), y=("y", yd[:,0]), time=("time", td[:,0]))
+        coords = dict(x=("x", xd[:,0]), y=("y", yd[:,0]), time=("time", td[:,0]))
         
     assert (time is not None) and (isotropy is not None), "input data not consistent with implementation"
     print(f" time = {time},  isotropy = {isotropy}  ")
@@ -671,39 +719,53 @@ def generate_uv(
     if time:
         Lt = np.linalg.cholesky(Cov_t)
         #Lt_dask = da.from_array(Lt).persist()
-        if dask_time:
-            t_chunk = 5
-            Lx = da.from_array(Lx, chunks=(-1, -1))
-            Lt = da.from_array(Lt, chunks=(t_chunk, -1)).persist()
+        if time_chunk is not None and time_chunk>0:
+            dask_time = True
+            if not dask_space:
+                Lx = da.from_array(Lx, chunks=(-1, -1))
+            Lt = da.from_array(Lt, chunks=(time_chunk, -1)).persist()
+            t_chunk_contraction = Lt.chunksize[1]
+        else:
+            t_chunk_contraction = -1
+    if isinstance(Lx, da.core.Array):
+        Lx = Lx.persist()
+        x_chunk_contraction = Lx.chunksize[1]
+    else:
+        x_chunk_contraction = -1
 
     # generate sample
     rstate = da.random.RandomState(seed)
     np.random.seed(seed)
     u0_noise, u1_noise = 0., 0.
     if time and not isotropy and dask_time:
-        U0 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-        U1 = rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+        assert False, "need update"
+        _chunks = (-1, x_chunk_contraction, t_chunk_contraction)
+        U0 = rstate.normal(0, 1, size=N, chunks=_chunks)
+        U1 = rstate.normal(0, 1, size=N, chunks=_chunks)
         if noise>0:
-            u0_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
-            u1_noise = noise * rstate.normal(0, 1, size=N, chunks=(-1, -1, t_chunk))
+            u0_noise = noise * rstate.normal(0, 1, size=N, chunks=_chunks)
+            u1_noise = noise * rstate.normal(0, 1, size=N, chunks=_chunks)
     elif time and not isotropy and not dask_time:
         assert False, "Not implemented"
     elif time and isotropy and dask_time:
         _N = (N[0]*N[1], N[2])
-        U0 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-        U1 = rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+        _chunks = (x_chunk_contraction, t_chunk_contraction)
+        U0 = rstate.normal(0, 1, size=_N, chunks=_chunks)
+        U1 = rstate.normal(0, 1, size=_N, chunks=_chunks)
         if noise>0:
-            u0_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
-            u1_noise = noise * rstate.normal(0, 1, size=_N, chunks=(-1, t_chunk))
+            u0_noise = noise * rstate.normal(0, 1, size=_N, chunks=_chunks)
+            u1_noise = noise * rstate.normal(0, 1, size=_N, chunks=_chunks)
     elif time and isotropy and not dask_time:
         assert False, "Not implemented"
     # not time
     elif not time and not isotropy and dask_space:
-        U0 = rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
-        U1 = rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
+        assert False, "need update"
+        _chunks = (-1, x_chunk_contraction,)
+        U0 = rstate.normal(0, 1, size=(N[0], N[1]), chunks=_chunks)
+        U1 = rstate.normal(0, 1, size=(N[0], N[1]), chunks=_chunks)
         if noise>0:
-            u0_noise = noise * rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
-            u1_noise = noise * rstate.normal(0, 1, size=(N[0], N[1]), chunks=(-1, -1,))
+            u0_noise = noise * rstate.normal(0, 1, size=(N[0], N[1]), chunks=_chunks)
+            u1_noise = noise * rstate.normal(0, 1, size=(N[0], N[1]), chunks=_chunks)
     elif not time and not isotropy and not dask_space:
         U0 = np.random.normal(0, 1, size=(N[0], N[1]))
         U1 = np.random.normal(0, 1, size=(N[0], N[1]))
@@ -711,11 +773,12 @@ def generate_uv(
             u0_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
             u1_noise = noise * np.random.normal(0, 1, size=(N[0], N[1]))
     elif not time and isotropy and dask_space:
-        U0 = rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
-        U1 = rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
+        _chunks = (x_chunk_contraction,)
+        U0 = rstate.normal(0, 1, size=(N[0]*N[1],), chunks=_chunks)
+        U1 = rstate.normal(0, 1, size=(N[0]*N[1],), chunks=_chunks)
         if noise>0:
-            u0_noise = noise * rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
-            u1_noise = noise * rstate.normal(0, 1, size=(N[0]*N[1],), chunks=(-1,))
+            u0_noise = noise * rstate.normal(0, 1, size=(N[0]*N[1],), chunks=_chunks)
+            u1_noise = noise * rstate.normal(0, 1, size=(N[0]*N[1],), chunks=_chunks)
     elif not time and isotropy and not dask_space:
         U0 = np.random.normal(0, 1, size=(N[0]*N[1],))
         U1 = np.random.normal(0, 1, size=(N[0]*N[1],))
@@ -733,12 +796,12 @@ def generate_uv(
     if time and not isotropy:
         u0 = amplitudes[0] * oe.contract("ij,kl,mn,jln", Lx, Ly, Lt, U0)
         u1 = amplitudes[1] * oe.contract("ij,kl,mn,jln", Lx, Ly, Lt, U1)
-    elif not time and not isotropy:
-        u0 = amplitudes[0] * oe.contract("ij,kl,jl", Lx, Ly, U0)
-        u1 = amplitudes[1] * oe.contract("ij,kl,jl", Lx, Ly, U1)
     elif time and isotropy:
         u0 = amplitudes[0] * oe.contract("ij,kl,jl", Lx, Lt, U0)
         u1 = amplitudes[1] * oe.contract("ij,kl,jl", Lx, Lt, U1)            
+    elif not time and not isotropy:
+        u0 = amplitudes[0] * oe.contract("ij,kl,jl", Lx, Ly, U0)
+        u1 = amplitudes[1] * oe.contract("ij,kl,jl", Lx, Ly, U1)
     elif not time and isotropy:
         u0 = amplitudes[0] * Lx @ U0
         u1 = amplitudes[1] * Lx @ U1
@@ -758,15 +821,13 @@ def generate_uv(
         u0 = u0.reshape(N[0], N[1])
         u1 = u1.reshape(N[0], N[1])
         
-    #return _u0, u0
-    
     if time:
         dims = ("x", "y", "time")
     else:
         dims = ("x", "y",)
     if kind=="uv":
-        ds["U"] = (dims, u0)
-        ds["V"] = (dims, u1)
+        ds["u"] = (dims, u0)
+        ds["v"] = (dims, u1)
     elif kind=="pp":
         ds["psi"] = (dims, u0)
         ds["phi"] = (dims, u1)
@@ -775,8 +836,8 @@ def generate_uv(
         dpsidy = ds.psi.differentiate("y")
         dphidx = ds.phi.differentiate("x")
         dphidy = ds.phi.differentiate("y")
-        ds["U"] = -dpsidy + dphidx
-        ds["V"] =  dpsidx + dphidy
+        ds["u"] = -dpsidy + dphidx
+        ds["v"] =  dpsidx + dphidy
 
     ds = ds.transpose(*reversed(dims))
     ds.attrs.update(kind=kind)
@@ -793,14 +854,14 @@ def amplitude_decifit(dx, λ, ν):
 # ------------------------------------- inference -----------------------------------------
 
 def prepare_inference(
-    data_dir, case,
+    run_dir,
     uv, no_time, no_space, 
     parameter_eta_formulation, traj_decorrelation,
 ):
 
     # load eulerian flow
-    flow_file = os.path.join(data_dir, case+"_flow.zarr")
-    dsf = xr.open_dataset(os.path.join(data_dir, flow_file))
+    flow_file = os.path.join(run_dir, "flow.zarr")
+    dsf = xr.open_zarr(flow_file)
     dsf["time"] = dsf["time"]/pd.Timedelta("1D")
     U = dsf.attrs["U"] # useful for computation of alpha much latter        
     
@@ -825,21 +886,21 @@ def prepare_inference(
     # get 1D covariances
     C, Ct, isotropy = get_cov_1D(p["cov_x"], p["cov_t"])
     Cu, Cv, Cuv = C
-    if "matern32" in p["cov_x"]:
-        p["nu_space"] = 3/2
-    else:
-        assert False, "no nu could be infered"
-    if "matern12" in p["cov_t"]:
-        p["nu_time"] = 1/2
-    else:
-        assert False, "no nu could be infered"
+    #if "matern32" in p["cov_x"]:
+    #    p["nu_space"] = 3/2
+    #else:
+    #    assert False, "no nu could be infered"
+    #if "matern12" in p["cov_t"]:
+    #    p["nu_time"] = 1/2
+    #else:
+    #    assert False, "no nu could be infered"
 
-    # correct for bias due to spatial differentiation and (psi to U)
-    _scale = amplitude_decifit(p["dx"], p["lambda_x"], p["nu_space"])
+    # correct for bias due to spatial differentiation and (psi to u/v)
+    #_scale = amplitude_decifit(p["dx"], p["lambda_x"], p["nu_space"])
     #η *= _scale
     #γ *= _scale
     #p["eta"] = η
-    p["amplitude_deficit"] = _scale
+    #p["amplitude_deficit"] = _scale
 
     for k, v in p.items():
         print(k, v)
@@ -1074,7 +1135,8 @@ def inference_MH(
     return ds
 
 def select_traj_core(ds, Nxy, dx):
-    ds = ds.isel(time=0)
+    if "time" in ds:
+        ds = ds.isel(time=0)
     tolerance = .1
     if dx is not None:
         assert Nxy>1, "Nxy must be >1 if dx is specified"
@@ -1105,42 +1167,70 @@ def select_traj(*args, repeats=5):
         assert False, "could not select trajectories"
     return s
 
+def mooring_inference_preprocess(
+    ds, seed, N, 
+    dx=None, 
+    **kwargs,
+):
+
+    Nt, Nxy = N
+    
+    # set random seed - means same mooring positions will be selected across different flow_scales
+    np.random.seed(seed)
+    # subsample temporally
+    ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
+    
+    # randomly select mooring location
+    ds = ds.stack(trajectory=["x", "y"])
+    traj_selection = select_traj(ds[["x", "y"]], Nxy, dx)
+    ds = ds.sel(trajectory=traj_selection)
+    ds["trajectory_local"] = ("trajectory", np.arange(ds.trajectory.size))
+    
+    return ds.compute()
+    
+
 def mooring_inference(
     dsf, seed,
     covparams, covfunc, labels, N, noise,
     inference="MH", uv=True,
     flow_scale=None, dx=None,
     write=None, overwrite=True,
+    preprocessed=False,
     **kwargs,
 ):
     """ run inference for moorings """
 
     Nt, Nxy = N
-    
+
+    # not used anymore
     if write is not None:
-        data_dir, case = write
+        run_dir, _ = write
         output_file = os.path.join(
-            data_dir,
-            case+f"_moorings_s{seed}_Nxy{Nxy}.nc",
+            run_dir,
+            f"moorings_s{seed}_Nxy{Nxy}.nc",
         )
         if flow_scale is not None:
             output_file = output_file.replace(".nc", f"_fs{flow_scale:.2f}.nc")
         if os.path.isfile(output_file) and not overwrite:
             return None
     
-    # set random seed - means same mooring positions will be selected across different flow_scales
-    np.random.seed(seed)
-    
-    # randomly select mooring location
-    ds = dsf.stack(trajectory=["x", "y"])
-    traj_selection = select_traj(ds, Nxy, dx)
-    ds = ds.sel(trajectory=traj_selection)
-    ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
-    # subsample temporally
-    ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
+    if not preprocessed:
+        # needs to be taken out when parallelized
+        ds = mooring_inference_preprocess(
+            dsf, seed, N, dx=dx,
+        )
+    else:
+        ds = dsf
 
+    u_scale = 1.
+    if flow_scale is not None:
+        u_scale = flow_scale
+    # update noise covparams
+    noise = noise * u_scale
+    covparams[0] = covparams[0] * u_scale # amplitude
+    
     # set up inference
-    u, v, x, y, t, traj = xr.broadcast(ds.U, ds.V, ds.x, ds.y, ds.time, ds.traj)
+    u, v, x, y, t, traj = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time, ds.trajectory_local)
     assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
     x = x.values.ravel()
     y = y.values.ravel()
@@ -1148,17 +1238,11 @@ def mooring_inference(
     traj = traj.values.ravel()
     #X = np.hstack([x[:,None], y[:,None], t[:,None]])
     X = np.hstack([x[:,None], y[:,None], t[:,None], traj[:,None]])
-    u = u.values.ravel()[:, None]
-    v = v.values.ravel()[:, None]
-    if flow_scale is not None:
-        u = u * flow_scale
-        v = v * flow_scale
-        # update covparams
-        covparams = covparams[:]
-        covparams[0] = covparams[0] * flow_scale
+    u = u.values.ravel()[:, None] * u_scale
+    v = v.values.ravel()[:, None] * u_scale
     # add noise
-    u += np.random.randn(*u.shape)*noise
-    v += np.random.randn(*v.shape)*noise
+    u += np.random.randn(*u.shape) * noise
+    v += np.random.randn(*v.shape) * noise
     if uv:
         X = np.vstack([X, X])
         U = np.vstack([u, v])
@@ -1205,39 +1289,45 @@ def run_mooring_ensembles(
     # MH default
     dkwargs["steps"] = (step, step, step, 1/2)
 
+    # preload data:
+    D = [
+        mooring_inference_preprocess(dsf, seed, N, **kwargs)
+        for seed in range(Ne)
+    ]
     mooring_inference_delayed = dask.delayed(mooring_inference)
     datasets = [
         mooring_inference_delayed(
-            dsf, seed, 
+            ds, seed, 
             covparams, covfunc, labels, N, noise, 
+            preprocessed=True,
             **dkwargs,
-        ) 
-        for seed in range(Ne)
+        )
+        for seed, ds in zip(range(Ne), D)
+        #for seed in range(Ne)
     ]
     datasets = dask.compute(datasets)[0]
     ds = xr.concat(datasets, "ensemble")
-    ds = ds.isel(i=slice(0,None,5))
+    ds = ds.isel(i=slice(0,None,5)) # subsample MCMC
     return ds
 
-def _open_drifter_file(data_dir, case, flow_scale=None):
+def _open_drifter_file(run_dir, flow_scale=None, **kwargs):
     
-    nc_file = os.path.join(data_dir, case+f"_drifters.nc")
+    zarr_file = os.path.join(run_dir, f"drifters.zarr")
     if flow_scale is not None:
-        nc_file = nc_file.replace(".nc", f"_fs{flow_scale:.2f}.nc")
+        zarr_file = zarr_file.replace(".zarr", f"_fs{flow_scale:.2f}.zarr")
+    ds = xr.open_zarr(zarr_file).compute()
     
-    ds = xr.open_dataset(nc_file)
-    ds = ds.drop("trajectory").rename_dims(dict(traj="trajectory")) # tmp
-    #ds = ds.chunk(dict(trajectory=100, obs=-1))
-    #ds = massage_coords(ds)
     ds = ds.rename(lon="x", lat="y")
     ds["x"] = ds["x"]/1e3
     ds["y"] = ds["y"]/1e3    
-    ds = ds.assign_coords(t=(ds["time"] - ds["time"][0,0])/pd.Timedelta("1D"))
+    ds = ds.assign_coords(t=ds["time"]/pd.Timedelta("1D"))
 
     # trajectory reaching the end of the simulation
-    maxt = ds.time.max("obs")
+    maxt = ds.t.max("obs").compute()
+    Tmax = np.floor(float(ds.t.max()))
+    print(f"Tmax = {Tmax:.2f} days")
     n0 = ds.trajectory.size
-    ds = ds.where( ~np.isnan(maxt), drop=True)
+    ds = ds.where( maxt>Tmax , drop=True)
     ns = ds.trajectory.size
     survival_rate = ns/n0*100
     print(f"{survival_rate:.1f}% of trajectories survived")
@@ -1250,35 +1340,28 @@ def _open_drifter_file(data_dir, case, flow_scale=None):
     #ds = ds.drop(["t", "time"])
     ds = ds.drop(["time"])
     ds["obs"] = ds.t.isel(trajectory=0)
-    ds = ds.drop("t").rename(obs="time")    
+    ds = (
+        ds
+        .drop("t")
+        .rename(obs="time")
+        .sel(time=slice(0,Tmax))
+    )
+    ds["survival_rate"] = survival_rate
 
-    return ds, survival_rate
+    return ds
 
-def drifter_inference(
-    drifter_dir, case, seed, 
-    covparams, covfunc, labels, N, noise,
-    inference="MH", uv=True, no_time=False,
-    flow_scale=None, dx=None,
-    write=None, overwrite=True,    
+def drifter_preprocess(
+    run_dir, N, seed, 
+    dx = None,
+    ds = None,
     **kwargs,
 ):
-    """ run inference for drifters """
-
+    
     Nt, Nxy = N
-
-    if write is not None:
-        data_dir, _ = write
-        output_file = os.path.join(
-            data_dir,
-            case+f"_drifters_s{seed}_Nxy{Nxy}.nc",
-        )
-        if flow_scale is not None:
-            output_file = output_file.replace(".nc", f"_f{flow_scale:.2f}.nc")    
-        if os.path.isfile(output_file) and not overwrite:
-            return
-
+    
     # parcels dataset
-    ds, survival_rate = _open_drifter_file(drifter_dir, case, flow_scale=flow_scale)
+    if ds is None:
+        ds = _open_drifter_file(run_dir, **kwargs)
 
     # set random seed
     np.random.seed(seed)
@@ -1286,11 +1369,51 @@ def drifter_inference(
     # randomly select Nxy trajectories
     traj_selection = select_traj(ds, Nxy, dx)
     ds = ds.sel(trajectory=traj_selection)
-    ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
+    #ds["traj"] = ("trajectory", np.arange(ds.trajectory.size))
 
     # subsample temporally
     ds = ds.isel(time=np.linspace(0, ds.time.size-1, Nt, dtype=int))
+    ds = ds.compute()
 
+    return ds
+
+def drifter_inference(
+    run_dir, seed, 
+    covparams, covfunc, labels, N, noise,
+    inference="MH", uv=True, no_time=False,
+    flow_scale=None, dx=None,
+    write=None, overwrite=True,
+    preprocessed=None,
+    **kwargs,
+):
+    """ run inference for drifters """
+
+    Nt, Nxy = N
+
+    # not used anymore it seems
+    if write is not None:
+        #run_dir, _ = write
+        output_file = os.path.join(
+            run_dir,
+            f"drifters_s{seed}_Nxy{Nxy}.nc",
+        )
+        if flow_scale is not None:
+            output_file = output_file.replace(".nc", f"_f{flow_scale:.2f}.nc")    
+        if os.path.isfile(output_file) and not overwrite:
+            return
+
+    if preprocessed is None:
+        ds = drifter_preprocess(run_dir, N, seed, flowscale=flowscale)
+    else:
+        ds = preprocessed
+    survival_rate = ds["survival_rate"]
+
+    if flow_scale is not None:
+        noise = noise * flow_scale # rescale noise
+        # update covparams
+        #covparams = covparams[:]
+        covparams[0] = covparams[0] * flow_scale
+    
     # massage inputs to inference problem
     if no_time:
         # this should not be necessary
@@ -1301,8 +1424,9 @@ def drifter_inference(
         X = np.hstack([x[:,None], y[:,None],])
     else:
         #u, v, x, y, t = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time)
-        u, v, x, y, t, traj = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time, ds.traj)
+        u, v, x, y, t, traj = xr.broadcast(ds.u, ds.v, ds.x, ds.y, ds.time, ds.trajectory)
         assert u.shape==v.shape==x.shape==y.shape==t.shape==traj.shape
+        assert not np.isnan(u).any(), ("u nan",u)
         x = x.values.ravel()
         y = y.values.ravel()
         t = t.values.ravel()
@@ -1319,11 +1443,6 @@ def drifter_inference(
         U = np.vstack([u, v])
     else:
         U = u
-
-    if flow_scale is not None:
-        # update covparams
-        covparams = covparams[:]
-        covparams[0] = covparams[0] * flow_scale
     
     # reset seed here
     np.random.seed(seed)
@@ -1354,7 +1473,7 @@ def drifter_inference(
         return ds
     
 def run_drifter_ensembles(
-    drifter_dir, case, 
+    run_dir, 
     Ne,
     covparams, covfunc, labels, N, noise,
     step=1/5,
@@ -1368,19 +1487,28 @@ def run_drifter_ensembles(
     # MH
     dkwargs["steps"] = (step, step, step, 1/2)
 
+    # preload data
+    ds = _open_drifter_file(run_dir, **kwargs)
+    D = [
+        drifter_preprocess(run_dir, N, seed, ds=ds, **kwargs)
+        for seed in range(Ne)
+    ]
+    
     drifter_inference_delayed = dask.delayed(drifter_inference)
     datasets = [
         drifter_inference_delayed(
-            drifter_dir, case, 
+            run_dir,
             seed,
             covparams, covfunc, labels, N, noise,
+            preprocessed=d,
             **dkwargs,
         ) 
-        for seed in range(Ne)
+        for d, seed in zip(D, range(Ne))
+        #for seed in range(Ne)
     ]
     datasets = dask.compute(datasets)[0]
     ds = xr.concat(datasets, "ensemble")
-    ds = ds.isel(i=slice(0,None,5))
+    ds = ds.isel(i=slice(0,None,5)) # subsample MCMC
     return ds
 
 
@@ -1403,42 +1531,42 @@ def plot_snapshot_pp(ds, darrow=20):
 
     ax = axes[0, 0]
     ds.psi.plot(ax=ax, cmap="RdBu_r")
-    dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    dsa.plot.quiver("x", "y", "u", "v", ax=ax)
     ax.set_aspect("equal")
     ax.set_title("psi")
 
     ax = axes[0, 1]
     ds.phi.plot(ax=ax, cmap="RdBu_r")
-    dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    dsa.plot.quiver("x", "y", "u", "v", ax=ax)
     ax.set_aspect("equal")
     ax.set_title("phi")
     
     ##
     ax = axes[1, 0]
-    ds.U.plot(ax=ax, cmap="RdBu_r")
-    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ds.u.plot(ax=ax, cmap="RdBu_r")
+    #dsa.plot.quiver("x", "y", "u", "v", ax=ax)
     ax.set_aspect("equal")
     ax.set_title("u")
 
     ax = axes[1, 1]
-    ds.V.plot(ax=ax, cmap="RdBu_r")
-    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    ds.v.plot(ax=ax, cmap="RdBu_r")
+    #dsa.plot.quiver("x", "y", "u", "v", ax=ax)
     ax.set_aspect("equal")
     ax.set_title("v")
     
     ##
-    divergence = ds.U.differentiate("x")/1e3 + ds.V.differentiate("y")/1e3
-    vorticity = ds.V.differentiate("x")/1e3 - ds.U.differentiate("y")/1e3
+    divergence = ds.u.differentiate("x")/1e3 + ds.v.differentiate("y")/1e3
+    vorticity = ds.v.differentiate("x")/1e3 - ds.u.differentiate("y")/1e3
     
     ax = axes[2, 0]
     divergence.plot(ax=ax, cmap="RdBu_r")
-    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    #dsa.plot.quiver("x", "y", "u", "v", ax=ax)
     ax.set_aspect("equal")
     ax.set_title("divergence")
 
     ax = axes[2, 1]
     vorticity.plot(ax=ax, cmap="RdBu_r")
-    #dsa.plot.quiver("x", "y", "U", "V", ax=ax)
+    #dsa.plot.quiver("x", "y", "u", "v", ax=ax)
     ax.set_aspect("equal")
     ax.set_title("vorticity")    
     
@@ -1587,16 +1715,11 @@ def plot_sensitivity_combined(
     bounds=None,
     label=None,
     type="shading",
-    dx_deficit_correction=10,
+    velocity_deficit=True,
+    legend_loc=0,
+    alpha_normalize=None,
+    **kwargs,
 ):
-
-    if dx_deficit_correction is not None:
-        # dx_deficit_correction is dx i.e. the original flow grid spacing
-        lambda_x = dsm.attrs["lambda_x"]
-        if "matern32" in dsm.attrs["cov_x"]:
-            nu = 3/2
-        else:
-            assert False, "not recognizing nu in cov_x"
     
     fig, axes = plt.subplot_mosaic(
         [['(a)', '(b)', '(c)', '(d)']],
@@ -1623,12 +1746,16 @@ def plot_sensitivity_combined(
         patch_artist=True,
         medianprops=dict(color="k", lw=2),
     )
-    
+
+    labels = dsm.parameter.values
+    labels = [r"${}_{}$".format(l[0], "s") if l=="λx" else l for l in labels]
+    labels = [r"${}_{}$".format(l[0], "t") if l=="λt" else l for l in labels]
+        
     # moorings
     ds = dsm
     if c is None:
         c = colors["mo"]
-    for p, k in zip(ds.parameter.values, axes):
+    for p, k, l in zip(ds.parameter.values, axes, labels):
         ax = axes[k]
         if MAP:
             da = ds["MAP"].sel(parameter=p)
@@ -1638,10 +1765,13 @@ def plot_sensitivity_combined(
                 .isel(i=slice(burn,None))
                 .mean("i")
             )
+        if (p=="γ" or p=="η" or p=="u") and alpha_normalize:
+            l = p+"/α"
+            da = (da/da["α"]).rename(p+"/α")
         if type=="boxplot":
-            _h = _boxplot(ax, da.values.T, da[x].values, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs)
+            _h = _boxplot(ax, da.values.T, da[x].values, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs, **kwargs)
         elif type=="shading":
-            _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha)
+            _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha, **kwargs)
         if b0 is None:
             b0 = _h
 
@@ -1649,7 +1779,7 @@ def plot_sensitivity_combined(
     if dsr is not None:
         ds, c = dsr, colors["dr"]
         
-        for p, k in zip(ds.parameter.values, axes):
+        for p, k, l in zip(ds.parameter.values, axes, labels):
             ax = axes[k]
             
             if MAP:
@@ -1660,15 +1790,18 @@ def plot_sensitivity_combined(
                     .isel(i=slice(burn,None))
                     .mean("i")
                 )
+            if (p=="γ" or p=="η" or p=="u") and alpha_normalize:
+                l = p+"/α"
+                da = (da/da["α"]).rename(p+"/α")
             if type=="boxplot":
-                _h = _boxplot(ax, da.values.T, da[x].values*x_scale+x_off, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs)
+                _h = _boxplot(ax, da.values.T, da[x].values*x_scale+x_off, boxprops=dict(facecolor=c, alpha=alpha), **boxkwargs, **kwargs)
             elif type=="shading":
-                _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha)
+                _h = _shadeplot(ax, da, da[x].values, color=c, alpha=alpha, **kwargs)
             if b1 is None:
                 b1 = _h
 
     # misc info
-    for p, k in zip(ds.parameter.values, axes):
+    for p, k, l in zip(ds.parameter.values, axes, labels):
         ax = axes[k]
         if MAP:
             da = ds["MAP"].sel(parameter=p)
@@ -1682,11 +1815,21 @@ def plot_sensitivity_combined(
             ax.set_xscale('function', functions=(forward2,inverse2))
 
         # truth
-        if (p=="γ" or p=="η") and dx_deficit_correction is not None:
-            _s = amplitude_decifit(dx_deficit_correction, lambda_x, nu)
-            #_s = 1 # tmp dev
-        else:
-            _s = 1.
+        _s = 1.
+        if (p=="γ" or p=="η"):
+            if velocity_deficit:
+                if "velocity_deficit" in dsm.attrs:
+                    _s = dsm.attrs["velocity_deficit"]
+                else:
+                    _s = amplitude_decifit(
+                        dsm.attrs["dx"], 
+                        dsm.attrs["lambda_x"], 
+                        dsm.attrs["nu_space"],
+                    )
+            if alpha_normalize:
+                l = p+"/α"
+                _s = _s/da["α"]
+                
         truth = da["true_parameters"]*_s+da[x]*0
         if type=="boxplot":
             h_truth = ax.scatter(
@@ -1701,18 +1844,24 @@ def plot_sensitivity_combined(
                 label="truth", zorder=10,
             )
 
-        ax.set_title(p)
+        ax.set_title(l)
         ax.set_xlabel(x)
         if not x_ticks_free:
             ax.set_xticks(_x)
         if ax==axes["(a)"]:
             #ax.legend()
+            if isinstance(h_truth, list):
+                h_truth = h_truth[0]
             if dsr is not None:
-                ax.legend([b0, b1, h_truth], ['moorings', 'drifters', 'truth'], loc='upper right')
+                _handles = [b0, b1, h_truth]
+                _legend_labels = ['moorings', 'drifters', 'truth']
             else:
-                ax.legend([b0, b1], [label, 'truth'], loc='upper right')
+                _handles = [b0, h_truth]
+                _legend_labels = [label, 'truth']
+            ax.legend(_handles, _legend_labels, loc=legend_loc)
 
         if bounds is not None:
+            # should adjust for gamma (alpha_normalize) - but works magically for now
             ax.set_ylim(bounds[p])
         add_parameter_bounds(ds.sel(parameter=p), ax)
         ax.grid()
@@ -1726,7 +1875,7 @@ def forward2(x):
 def inverse2(x):
     return 2**x
 
-def _boxplot(ax, da, positions, **kwargs):
+def _boxplot(ax, da, positions, quantiles=None, **kwargs):
     bplot = ax.boxplot(
         da, 
         positions=positions, 
@@ -1734,8 +1883,9 @@ def _boxplot(ax, da, positions, **kwargs):
     )
     return bplot["boxes"][0]
 
-def _shadeplot(ax, da, positions, **kwargs):
-    q0, qm, q1 = 1/4, 1/2, 3/4
+def _shadeplot(ax, da, positions, quantiles=(1/4, 3/4), **kwargs):
+    q0, q1 = quantiles
+    qm = 1/2
     daq = da.quantile([q0, qm, q1], "ensemble")
     _kwargs = dict(**kwargs)
     _kwargs["alpha"] = 1
@@ -1755,6 +1905,17 @@ def add_parameter_bounds(ds, ax):
     ax.add_patch(rect)
     rect = Rectangle((x0,upper), x1-x0, upper+100, facecolor="0.5", zorder=0, alpha=0.5)
     ax.add_patch(rect)
+
+def print_quantile_width(ds, dim, quantiles=(1/4, 3/4)):
+    """ print quantile width along a dimension """
+    
+    daq = ds.MAP.quantile(quantiles, "ensemble")
+    nwidth = (daq.isel(quantile=1) - daq.isel(quantile=0))/ds.true_parameters
+    
+    print("% "+dim+" | " + " | ".join(ds.parameter.values))
+    for d in ds[dim]:
+        _w = nwidth.sel(**{dim: d})
+        print(f"% {d.values} | "+ " | ".join([f"{__w:.2f}" for __w in _w.values]))
 
 def label_and_print(fig, axs, fig_name):
     """ add labels on figures and print into files """
