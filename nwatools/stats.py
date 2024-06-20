@@ -306,7 +306,6 @@ def kernel_3d_iso_uv(x, xpr, params, C):
     #
     C = np.ones((2*n,2*n))
     #
-    C = np.ones((2*n,2*n))
     C[:n,:n] *= Cu(_x, _y, _d, ld)
     C[n:,n:] *= Cv(_x, _y, _d, ld)
     #assert False, "need to check two lines below is correct, e.g. isn't a transpose required or a sign change?"
@@ -402,17 +401,17 @@ def kernel_2d_iso_uv(x, xpr, params, C):
     Cu, Cv, Cuv = C
     
     # Build the covariance matrix
-    n = x.shape[0]//2
-    _x = x[:n,0,None] - xpr.T[:n,0,None].T
-    _y = x[:n,1,None] - xpr.T[:n,1,None].T
+    n, m = x.shape[0]//2, xpr.shape[1]//2
+    _x = x[:n,0,None] - xpr.T[:m,0,None].T
+    _y = x[:n,1,None] - xpr.T[:m,1,None].T
     _d = np.sqrt( _x**2 + _y**2 )
     #
-    C = np.ones((2*n,2*n))
+    C = np.ones((2*n,2*m))
     # test comment out
-    C[:n,:n] *= Cu(_x, _y, _d, ld)
-    C[:n,n:] *= Cuv(_x, _y, _d, ld)
-    C[n:,:n] = C[:n,n:]   # assumes X is indeed duplicated vertically
-    C[n:,n:] *= Cv(_x, _y, _d, ld)
+    C[:n,:m] *= Cu(_x, _y, _d, ld)
+    C[:n,m:] *= Cuv(_x, _y, _d, ld)
+    C[n:,:m] = C[:n,m:]   # assumes X is indeed duplicated vertically
+    C[n:,m:] *= Cv(_x, _y, _d, ld)
     #
     C *= eta**2
     
@@ -1310,7 +1309,7 @@ def run_mooring_ensembles(
     ds = ds.isel(i=slice(0,None,5)) # subsample MCMC
     return ds
 
-def _open_drifter_file(run_dir, flow_scale=None, **kwargs):
+def open_drifter_file(run_dir, flow_scale=None, filter=True, **kwargs):
     
     zarr_file = os.path.join(run_dir, f"drifters.zarr")
     if flow_scale is not None:
@@ -1327,8 +1326,10 @@ def _open_drifter_file(run_dir, flow_scale=None, **kwargs):
     Tmax = np.floor(float(ds.t.max()))
     print(f"Tmax = {Tmax:.2f} days")
     n0 = ds.trajectory.size
-    ds = ds.where( maxt>Tmax , drop=True)
-    ns = ds.trajectory.size
+    dsf = ds.where( maxt>Tmax , drop=True)
+    if filter:
+        ds = dsf
+    ns = dsf.trajectory.size
     survival_rate = ns/n0*100
     print(f"{survival_rate:.1f}% of trajectories survived")
     #
@@ -1339,7 +1340,7 @@ def _open_drifter_file(run_dir, flow_scale=None, **kwargs):
     t = ds.t
     #ds = ds.drop(["t", "time"])
     ds = ds.drop(["time"])
-    ds["obs"] = ds.t.isel(trajectory=0)
+    ds["obs"] = ds.t.max("trajectory")
     ds = (
         ds
         .drop("t")
@@ -1361,7 +1362,7 @@ def drifter_preprocess(
     
     # parcels dataset
     if ds is None:
-        ds = _open_drifter_file(run_dir, **kwargs)
+        ds = open_drifter_file(run_dir, **kwargs)
 
     # set random seed
     np.random.seed(seed)
@@ -1488,7 +1489,7 @@ def run_drifter_ensembles(
     dkwargs["steps"] = (step, step, step, 1/2)
 
     # preload data
-    ds = _open_drifter_file(run_dir, **kwargs)
+    ds = open_drifter_file(run_dir, **kwargs)
     D = [
         drifter_preprocess(run_dir, N, seed, ds=ds, **kwargs)
         for seed in range(Ne)
@@ -1710,7 +1711,7 @@ def traceplots(ds, MAP=True, burn=None):
 # combined plot of inference performance
 def plot_sensitivity_combined(
     dsm, dsr, MAP=True, 
-    x=None, xlog2=False, x_width=0.2, x_off=0., x_scale=1., x_ticks_free=True,
+    x=None, xlog2=False, x_width=0.2, x_off=0., x_scale=1., x_ticks_free=True, x_label=None,
     alpha=None, c=None,
     bounds=None,
     label=None,
@@ -1750,6 +1751,9 @@ def plot_sensitivity_combined(
     labels = dsm.parameter.values
     labels = [r"${}_{}$".format(l[0], "s") if l=="λx" else l for l in labels]
     labels = [r"${}_{}$".format(l[0], "t") if l=="λt" else l for l in labels]
+
+    if x_label is None:
+        x_label = x
         
     # moorings
     ds = dsm
@@ -1845,7 +1849,7 @@ def plot_sensitivity_combined(
             )
 
         ax.set_title(l)
-        ax.set_xlabel(x)
+        ax.set_xlabel(x_label)
         if not x_ticks_free:
             ax.set_xticks(_x)
         if ax==axes["(a)"]:
@@ -1905,6 +1909,19 @@ def add_parameter_bounds(ds, ax):
     ax.add_patch(rect)
     rect = Rectangle((x0,upper), x1-x0, upper+100, facecolor="0.5", zorder=0, alpha=0.5)
     ax.add_patch(rect)
+
+def print_MAP_truth_difference(ds, dim):
+    """ print MAP - truth difference along with normalized difference"""
+    da = ds.MAP.median("ensemble")
+    print("% "+dim+" | " + " | ".join(ds.parameter.values))
+    for d in ds[dim]:
+        _da = da.sel({dim: d})
+        print(f"% {d.values} | "
+              + " | ".join([f"{float(_da.sel(parameter=p)):.2f} / {float(_da.true_parameters.sel(parameter=p)):.2f}" for p in _da.parameter])
+        )
+        print(f"% normalized diff | "
+              + " | ".join([f"{float((_da.sel(parameter=p)-_da.true_parameters.sel(parameter=p))/_da.sel(parameter=p))*100:.1f}"  for p in _da.parameter])
+        )
 
 def print_quantile_width(ds, dim, quantiles=(1/4, 3/4)):
     """ print quantile width along a dimension """
